@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>三运行时与宿主适配 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>三运行时与宿主适配</h1>
+<p class="lead">同一个 <code>Brush-&lt;version&gt;.jar</code> 在三种运行时下形态不同：S1 它是加载器与入口，S2 / S3 它只是一个宿主 mod。本页说明三种形态、宿主隔离的判据、S3 特有的载荷转注册，以及形态 B这条最危险的风险线。</p>
+
+<h2>三种形态与启动命令</h2>
+
+<table>
+<thead><tr><th>场景</th><th>宿主 / 形态</th><th>入口</th><th>命令</th></tr></thead>
+<tbody>
+<tr><td><strong>S1</strong></td><td>无宿主。vanilla + 自研 <code>BrushClassLoader</code> + 自研 MixinService</td><td><code>org.abstruck.brush.launch.Brush</code></td><td><code>gradlew.bat runClient</code></td></tr>
+<tr><td><strong>S2</strong></td><td>Fabric Loader 0.19.5（Knot）。Brush 作为 mod 放进 <code>run\fabric\mods\</code></td><td>Knot 按 <code>fabric.mod.json</code> 加载</td><td><code>gradlew.bat runFabricClient</code></td></tr>
+<tr><td><strong>S3</strong></td><td>NeoForge 26.1.2.114（FML 11.0.15）。Brush 作为 mod 放进 <code>run\neoforge\mods\</code></td><td><code>net.neoforged.fml.startup.Client</code></td><td><code>gradlew.bat runNeoForgeClient</code></td></tr>
+</tbody>
+</table>
+
+<p>宿主下 <strong>P1 启动管线整体不启动</strong>：不调用 <code>TransformBootstrap.install()</code>，只注册派发表监听器；注入由宿主的 mixin 子系统在类加载期施加。<code>fabric.mod.json</code> / <code>META-INF/neoforge.mods.toml</code> 保留，因此 Brush 仍出现在宿主的 mod 列表里。</p>
+
+<div class="note">发行版的三个 <code>run*Client</code> 是<strong>交互式纯客户端启动</strong>，因此没有自动退出点与退出码断言 —— 它们用于人工观察，不是测试通道。<code>runClient</code> 启动前会清空 <code>run\brush-mods\</code> 里的 jar，保证「干净 S1」是确定态。</div>
+
+<h2>宿主抽象与「核心不引用宿主类型」的判据</h2>
+
+<p>核心与宿主严格解耦，靠两条机械判据维持：</p>
+
+<ol>
+<li><strong>包边界</strong>：宿主相关代码全部收在 <code>org.abstruck.brush.host</code> 下（<code>host.fabric.*</code>、<code>host.neoforge.*</code>、<code>host.HostSeams</code>）；核心的 <code>transform</code> / <code>mod</code> / <code>launch</code> 层不 import 任何 <code>net.fabricmc.*</code> / <code>net.neoforged.*</code>。</li>
+<li><strong>通信只经系统属性与 JDK 类型</strong>：宿主入口把事实写成系统属性（<code>brush.host</code> / <code>brush.host.version</code> / <code>brush.host.mods</code> / <code>brush.game.version</code>），核心单向读取；跨层调用只经 JDK 类型（<code>Path</code> / <code>String</code> / <code>BiFunction</code>）与反射，不共享自定义类型身份。</li>
+</ol>
+
+<p>唯一的「反向」需求是 S3 的 mod 事件总线：它只有核心的 <code>@Mod</code> 构造器拿得到，若核心去调桥就变成 core → mod。解法是 <code>host.HostSeams</code> 这条<strong>接缝</strong> —— 核心只把事件总线<strong>当 <code>Object</code> 递出去</strong>（<code>fireModEventBus</code>），由库模组注册回调自己接住并挂载载荷转注册。核心因此零 mod 类型引用，「引用宿主类型」留在允许引用宿主类的库模组里。</p>
+
+<p>核心侧的改动面被压到极小：<code>CoreHooks</code> / <code>InjectionLedger</code> 转 public、<code>Selftest</code> 增加 <code>brush.host*</code> 属性读取与宿主守卫位。</p>
+
+<h2><code>brush.standalone</code> 守卫：让自研 MixinService 在宿主下让位</h2>
+
+<p><code>BrushMixinService.isValid()</code> 的实现只有一行语义：<strong>仅当系统属性 <code>brush.standalone</code> 为 <code>"true"</code> 时有效</strong>。该属性只由 <code>TransformBootstrap.install()</code> 在 standalone 启动时设置，宿主引导路径不会设置它。</p>
+
+<p>但真正让 S2 / S3 结构性安全的不是这个守卫，而是宿主的<strong>属性钉死</strong>：Fabric 的 <code>FabricMixinBootstrap</code> 与 NeoForge 的 <code>MixinFacade</code> 都在 mixin 引导<strong>之前</strong>显式 <code>System.setProperty("mixin.service", …)</code>，sponge-mixin 的 <code>MixinService.initService()</code> 优先读该属性 —— 宿主环境根本不走 ServiceLoader 枚举。</p>
+
+<table>
+<thead><tr><th>运行时</th><th>实测 <code>mixin.service</code></th></tr></thead>
+<tbody>
+<tr><td>S1</td><td><code>Brush</code>（<code>org.abstruck.brush.transform.BrushMixinService</code>）</td></tr>
+<tr><td>S2</td><td><code>Knot/Fabric</code>（<code>net.fabricmc.loader.impl.launch.knot.MixinServiceKnot</code>）</td></tr>
+<tr><td>S3</td><td><code>FML</code>（<code>net.neoforged.fml.loading.mixin.FMLMixinService</code>）</td></tr>
+</tbody>
+</table>
+
+<p>自检里另有一位守卫：宿主模式下若 <code>brush.standalone</code> 意外为 true、或 mixin 服务是 <code>BrushMixinService</code>，即判失败 —— 防「模式切换错误导致后续全部无意义」。实测报告行：<code>host.guard: ok (standalone mark absent, mixin service is not BrushMixinService)</code>。</p>
+
+<h2>宿主下 ClassLoader 的分工</h2>
+
+<ul>
+<li>宿主有自己的加载器（Knot / FML <code>TransformingClassLoader</code>），<strong>MC 类的定义权在宿主</strong>。</li>
+<li>我们的加载器<strong>只服务我们自己的 mod</strong>，不抢 MC 类的定义权。</li>
+<li><strong>我们自己的 jar 不进宿主 JVM 的 classpath</strong>：它以 mod 形态被宿主发现并按元数据处理 —— 这正是「Brush 在宿主下只是一个普通 mod」的形态自证。</li>
+<li>依赖重复（ASM / gson / mixin jar）需排查，优先复用宿主提供的。预研实测：三方的 mixin 内核完全同版本（<code>sponge-mixin 0.17.4 + Mixin 0.8.7</code>），风险面因此收缩为类空间归属问题。</li>
+</ul>
+
+<h2>两个宿主目录的隔离约定</h2>
+
+<div class="ok">我们的 mod 放 <code>brush-mods\</code>，<strong>不混 <code>mods\</code></strong>：宿主加载器会扫 <code>mods\</code>，而我们的 mod在那边可能被告警或误解析；反过来我们也可能误扫宿主的 mod。双向隔离成本很低。</div>
+
+<p>实测：宿主扫 <code>mods\</code>，我们的加载只看到 <code>brush-mods\</code> 里的我们生态 mod —— 双向不越界。S1 的目录同样固定为 <code>&lt;game-dir&gt;\brush-mods</code>，三个运行时用同一份实现。</p>
+
+<h2>S3 特有：载荷转注册</h2>
+
+<p>vanilla 的 <code>CustomPacketPayload</code> 没有方向接口，而 <strong>NeoForge 要求自定义载荷先经它的 <code>NetworkRegistry</code> 登记</strong>，未登记者 <code>checkPacket</code> 直接拒绝。后果是真实的平台缺口：S3 实机探针首次跑时崩在发载荷上 ——</p>
+
+<pre><code>java.lang.IllegalStateException: [brush] hook listener (order=0, seq=32) for event 'client.tick' failed
+  Caused by: java.lang.UnsupportedOperationException: Payload pingnet:ping may not be sent to the server!</code></pre>
+
+<p>修法是把已知通道转登记进 NeoForge：在 mod bus 的 <code>RegisterPayloadHandlersEvent</code> 上对每个通道调用 <code>playBidirectional(type, codec, NOOP, NOOP)</code>。<strong>handler 是空实现</strong>，登记只为让方向校验放行，投递仍走我们自己的注入点 —— 实测 <code>server.pings=1, client.pongs=1</code> 证明既无双重投递、也未被打包截走。桥与网络引擎现已整体住在库模组 <code>brush-api</code>（<code>org.abstruck.brush.api.impl.host.NeoForgePayloadBridge</code>），核心只经 <code>HostSeams</code> 把事件总线递出去。</p>
+
+<div class="warn">已登记的局限：桥只覆盖它收到总线<strong>之前</strong>已经登记的通道。一次独立评审指出 S3 自检档桥为 <code>1 of 1</code> 而同场报告 <code>network: channels=2</code> —— 晚登记的通道在 S3 下可能发不出去。当前残留表现是 S3 下 8 条 <code>No registration for payload …; refusing to decode</code> 提示，被定性为良性噪音。</div>
+
+<h2>形态 B（静默失效）与防线现状</h2>
+
+<p>注入失效可分两形态：<strong>形态 A</strong>在 <code>require=1</code> 下硬失败，可捕获；<strong>形态 B</strong><strong>无任何报错</strong>，是更坏的形态。项目纪律原设计有三层防御，其中第三层是「启动期扫描 <code>@Overwrite</code> 并告警」。实测两宿主的时间线证明当前形态未触发形态 B：<code>S2 ready</code> 早于 <code>hook fired: client.run</code>，<code>S3 ready</code> 同样早于它。</p>
+
+<div class="warn">须知道的现状变更：那层<strong>主动扫描器已被用户撤销</strong>。自检报告行固定打印 <code>overwrite.scan=not-implemented</code>。形态 B 的防线因此回退为三条：① 注入点 <code>require=1</code>；② mixin / 宿主自身的冲突日志；③ 薄注入 + 可链式选址带来的天然低冲突面。对应的纪律修订提案当时待用户确认 —— 本页以实测记录为准。</div>
+
+<p>另有一条同源的补充证据线：宿主（S2/S3）的 mixin 服务不汇报施加台账，因此「mod 自带 mixin 到底有没有生效」在宿主下没有内省证据。<strong>解法是行为断言</strong> —— 在真实运行时驱动被 mod 包装过的方法看结果，三运行时同一条断言全 <code>result=ok</code>。这条证明的是<strong>效果</strong>，与注入点台账证明的<strong>织入</strong>互补，缺一不可。</p>
+
+<h2>「S1 必须始终可运行」的熔断规则</h2>
+
+<div class="note">熔断：一旦 S1 跑不通，说明核心已被宿主污染，<strong>立刻停下重构</strong>；任何阶段若发现「为了让宿主适配更省事而放宽对核心的隔离要求」，停下并报告，不要自行推进。因此每次宿主适配改动后都要重跑 S1 回归：P6 核心 8 个文件改动后重跑 T1 为退出码 0、<code>host=vanilla</code>、<code>mixin.service=Brush</code>；P7 改动后 T1 与 T2 同批重跑均为退出码 0，三运行时同时绿。</div>
+
+<h2>实测状态</h2>
+
+<table>
+<thead><tr><th>用例</th><th>宿主</th><th>断言</th><th>结论</th></tr></thead>
+<tbody>
+<tr><td>T1</td><td>vanilla</td><td>退出码 0；hook 全命中；无注入失败</td><td>通过</td></tr>
+<tr><td>T2</td><td>Fabric Loader 0.19.5 + Fabric API</td><td>上述 + Fabric mod 出现在已加载列表；<strong>无任何 Mixin 冲突日志</strong></td><td>通过</td></tr>
+<tr><td>T3</td><td>NeoForge 26.1.2.114（FML 11.0.15）</td><td>上述 + Neo mod 出现在已加载列表</td><td>通过</td></tr>
+<tr><td>T4</td><td>—</td><td>注入面变更必须显式登记：基线 / 台账 / 代码镜像 / mixin 实际指令四面一致</td><td>通过</td></tr>
+</tbody>
+</table>
+
+<p>矩阵命令（<code>compatTest</code> / <code>compatTestFabric</code> / <code>compatTestNeoForge</code> / <code>footprintCheck</code>）属开发期的测试装置；本发行包移除了这些测试性质任务，因此在这里<strong>不可执行</strong>，上表结论引自开发期的实测档案。</p>
+
+<p>实测结论台账的现行门禁态结论行：<code>compatTest</code>（T1+T2+T3+T4）<strong>全绿</strong>，T1/T2/T3 均为 <code>selftest: result=PASS, exit.code=0</code>，T4 <code>footprint PASS</code>；台账同时登记 footprint、mod 加载数与实机探针的现值。</p>
+
+<div class="ok">三运行时各自的宿主共存断言也已实测：T2 宿主 mod 列表含 <code>fabric-api</code> / <code>sodium</code> / <code>modmenu</code>，T3 含 <code>neoforge</code> / <code>sodium</code>，且两场都含 <code>brush@26.10.1</code> —— 「宿主生态 mod 与我们的 mod 同时出现在已加载列表」这一验收标准成立。</div>
+
+<h2>仍未验证 / 需人工确认的项</h2>
+
+<ul>
+<li><strong>真实渲染与游玩</strong>：自检模式在首个 <code>client.tick</code> 即退出，未进入主菜单；<code>runFabricClient</code> / <code>runNeoForgeClient</code> 的窗口与主菜单属人工验证项，官方口径是<strong>不用「未跑」冒充通过</strong>。</li>
+<li><strong>注入点失配风险</strong>：NeoForge 自身改动 vanilla，失配风险高于 Fabric；缓解是更保守的选址与更严的校验。当前目标点实测命中，属本配置结论，不外推。</li>
+<li><strong>S2/S3 下的 mod mixin 内省</strong>：仍是 <code>n/a</code>；效果已由行为断言覆盖，但「内省不到」这一事实保留。</li>
+</ul>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

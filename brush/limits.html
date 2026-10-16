@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>最小改动原则与禁止清单 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>最小改动原则与禁止清单</h1>
+<p class="lead">「改得少」不是审美偏好，而是 S2 / S3 能否成立的技术前提：footprint 越小，与宿主及其他 mod 撞车的概率越低。页面给出量化上限表、禁止清单、允许的替代方案、footprint 台账与四面一致性闸门（T4）的工作方式、新增注入点的流程，以及已废弃方案的清单。机制侧见 <a href="injection.html">注入层</a>与 <a href="dispatch.html">派发层与事件</a>，闸门的运行方式见 <a href="diagnostics.html">测试矩阵与诊断</a>。</p>
+
+<h2>为什么「改得少」是共存的技术前提</h2>
+<p>混合环境里最糟的结果不是崩溃，而是<strong>静默失效</strong>：别人的 <code>@Overwrite</code> 把我们的注入抹掉，日志干净、功能消失、无任何报错。</p>
+<p>薄注入把风险压到结构上最小：每个 vanilla 方法上我们只占<strong>恰好一条</strong>指令，撞的是这一条而非 N 条；可链式注入器让多方注入能叠加共存而不是互相替换。而且<strong>不必抢地盘</strong> —— 决策逻辑都在派发表里，加删监听器<strong>不重新 transform 任何类</strong>。这也是「叠加层」定位能自洽的原因。</p>
+<div class="warn">
+设计选择的排序是明确的：<strong>任何设计决策遇到「改动更少」与「实现更省事」冲突时，一律选前者</strong>。这不是建议，是最高设计约束。
+</div>
+
+<h2>量化上限表（硬性）</h2>
+<table>
+<tr><th>指标</th><th>上限</th><th>说明</th></tr>
+<tr><td>每个 vanilla 方法上的注入点</td><td><strong>1 个</strong></td><td>唯一登记的例外：<code>BuiltInRegistries#bootStrap</code> 的 HEAD（<code>registries.bootstrap</code>）+ TAIL（<code>client.registration</code>）双点，<strong>经用户批准</strong>，每点仍各 1 条织入指令</td></tr>
+<tr><td>每个注入点织入的指令</td><td><strong>1 条</strong> <code>Dispatcher.fire(...)</code></td><td>少数点的形态是「引导 + 派发一体」的单条静态调用（<code>EarlyBoot.onBootstrap()</code> / <code>ClientBoot.onClientRun()</code>）；注入点工作体属 handler 体内语义</td></tr>
+<tr><td>vanilla 类结构改动</td><td><strong>0</strong></td><td>不改签名、不增删方法字段、不改继承、不改注解</td></tr>
+<tr><td>控制流改动</td><td><strong>0</strong></td><td>不用 <code>ci.cancel()</code>、不用 <code>@Redirect</code>、不改返回值、不提前 return</td></tr>
+<tr><td>vanilla 磁盘文件</td><td><strong>0</strong></td><td>只在内存中变换；磁盘上的 vanilla 文件全程只读</td></tr>
+</table>
+
+<h2>禁止清单</h2>
+<table>
+<tr><th>禁止项</th><th>为什么</th></tr>
+<tr><td><code>@Overwrite</code></td><td>完全替换方法体、丢弃原实现。<strong>形态 A</strong>：方法体已被换掉，我们的注入点可能不复存在；<strong>形态 B</strong>：overwrite 后于我们的注入 → 已织入的代码随方法体一起被抹掉，<strong>静默消失、无任何报错</strong></td></tr>
+<tr><td>不可链式注入器（<code>@Redirect</code> / <code>@ModifyConstant</code> / <code>@Inject(HEAD)+ci.cancel()</code>）</td><td>同一目标只能重定向或取消一次 —— 多方注入天然互斥。这三者与 <code>@Overwrite</code> 一样属自研代码与示例 mod 的禁止项，除非先写明为何 MixinExtras 包装类注入器不可用</td></tr>
+<tr><td>用 <code>@Unique</code> 给 vanilla 类加字段</td><td>最隐蔽的污染源：改了类结构、占了名字空间、与其他 mod 的同类做法天然冲突</td></tr>
+<tr><td>脆弱定位</td><td>越深入方法内部越脆弱，vanilla 一重构就失配，还会与其他 mod 抢同一处</td></tr>
+<tr><td>未登记的 access widener / access transformer</td><td>不改字节码，但<strong>改变了 vanilla 成员的可见性契约，属于改动面</strong>；每条都要登记目标成员、原可见性、改为何、为何必需。不得「顺手」放宽一批成员</td></tr>
+<tr><td>NeoForge 侧带 <code>refmap</code> 的 mixin 配置</td><td>三运行时统一官方名，无需转换；NeoForge 不做 runtime refmap detection，配了会坏</td></tr>
+<tr><td>任何形式的重映射</td><td>26.1 起游戏未混淆，官方名即运行时名；Intermediary / Yarn 已在 1.21.11 后停止更新</td></tr>
+<tr><td>让注入点未命中时静默跳过（<code>required=false</code>）</td><td><code>require=1</code> 是捕获形态 A 的唯一手段；静默降级会把「注入没生效」藏成「功能不存在」</td></tr>
+<tr><td>声称「外部进程可以运行时劫持方法参数」</td><td>JVM 没有这种机制，连 Arthas 也是靠字节码织入拿参数。外部监控 / attach 不得作为 hook 的常规实现路径</td></tr>
+</table>
+<p class="muted">完整清单另含编造依赖坐标 / 类名 / 数字、未探测就假定路径、未经实测宣称兼容、为让测试变绿而放宽断言等工程纪律项。</p>
+
+<h2>允许的替代方案</h2>
+<table>
+<tr><th>需求</th><th>用什么</th><th>台账中的实例</th></tr>
+<tr><td>重写方法逻辑</td><td><code>@WrapMethod</code></td><td><code>extractTabButton</code>、<code>MinecraftServer#reloadResources</code></td></tr>
+<tr><td>替换调用 / 表达式 / 返回值</td><td><code>@ModifyReturnValue</code> / <code>@ModifyExpressionValue</code> / <code>@WrapOperation</code> / <code>@WrapWithCondition</code></td><td><code>CustomPacketPayload$1#findCodec</code> 的 RETURN 包装；<code>Options#&lt;init&gt;</code> 的 <code>@ModifyExpressionValue</code></td></tr>
+<tr><td>给 vanilla 对象挂数据</td><td>外部 <code>WeakHashMap</code> / <code>WeakReference</code>，放在我们自己的类里；注意防内存泄漏并写进文档</td><td><code>WeakHashMap&lt;Screen, Button&gt;</code>、<code>WeakHashMap&lt;Screen, SidebarPanel&gt;</code></td></tr>
+<tr><td>访问 vanilla 保护 / 私有成员</td><td><code>@Accessor</code> / <code>@Invoker</code>：<strong>不产生注入指令</strong>，也无全局可见性变化 —— 因此台账「可见性改动」一栏保持「无」，优于 access widener</td><td>核心配置 client 段的 4 个接口：<code>ScreenAccess</code> / <code>CreativeScreenAccess</code> / <code>KeyboardAccess</code> / <code>MouseAccess</code></td></tr>
+</table>
+<div class="note">
+<strong>连「重写方法逻辑」都有可链式方案。</strong> 薄注入真正无解的只有一行：<strong>改 vanilla 类的结构</strong>—— 那正是补丁机制干的事，也是最危险、最易冲突的一类。Brush 禁止它是<strong>主动选择，不是能力不足</strong>。确实需要改结构时：先论证能否用外部映射表或数据驱动绕开；绕不开就停下来报告，不要自行开禁。
+</div>
+
+<h2>footprint 台账与四面一致性（T4）</h2>
+<p>注入面台账只有一处。它登记的是<strong>对 vanilla 的全部改动面</strong>—— 能力型 API 拆成第一方库模组后注入点跨 jar 分散，但总数不变，归属由行末 <code>[source=…]</code> 标注。每个注入点登记五个字段：注入点、注入位置、注入器类型、用途、是否热路径。</p>
+<p>启动日志必须打印注入点总数与被注入的 vanilla 类数；当前两个数字是 <strong>21 点 / 16 类</strong>。<span class="badge">早期资料写 18 点 / 13 类，以当前台账与基线为准</span></p>
+<h3>四个面</h3>
+<p><code>FootprintCheck</code> 是纯静态、秒级的闸门，挂进 <code>check</code>，也是兼容测试矩阵的 T4 环节。四面对上才 PASS：</p>
+<table>
+<tr><th>面</th><th>内容</th></tr>
+<tr><td>1. 基线</td><td><code>FootprintCheck.BASELINE_POINTS</code> / <code>BASELINE_CLASSES</code> 两个常量。改它 = 一次需要说明的变更，必须与台账、代码镜像同处一份 diff</td></tr>
+<tr><td>2. 台账文档</td><td>台账本身：摘要行与表格逐行自洽，且与代码一致 —— <strong>摘要行与表行的格式即校验接口</strong></td></tr>
+<tr><td>3. 代码镜像</td><td><code>InjectionLedger.ENTRIES</code>：设计侧数字。跨 jar 仍<strong>只有一份镜像</strong> —— 两份必然漂移</td></tr>
+<tr><td>4. 真实注入指令</td><td>按 <code>brush.mixins.json</code>列出的全部 mixin 类，用 ASM 逐个读类文件：注入器注解方法数<strong>求和</strong>、<code>@Mixin</code> 目标类名<strong>取并集</strong>。它最接近「实际有几个注入点」，专门捕获「加了 <code>@Inject</code> 但没登记台账」</td></tr>
+</table>
+<ul>
+<li><strong>为什么第 4 面用 ASM 而不是反射</strong>：<code>@Mixin</code> 是 <code>RetentionPolicy.CLASS</code>，运行期反射不可见；读类文件对 <code>@Mixin</code> 与 <code>@Inject</code> 一视同仁，且与 mixin 自己消费注解的方式同源。</li>
+<li><strong>计数口径</strong>：注入点 = 被注入器注解直接标注的方法数；<code>@At</code> / <code>@Slice</code> 是成员注解、不计。契约是<strong>每注入器方法恰一个注入点</strong>。</li>
+<li><strong>被注入类口径</strong>：只算<strong>注入器承载类</strong>的 <code>@Mixin</code> 目标并集；accessor / invoker 承载类只产生访问桥接方法，不计入。这条口径 2026-10-10 经用户批准修订。</li>
+<li><strong>配置驱动枚举</strong>：mixin 只会施加配置里列出的类，配置即权威清单 —— 新增 mixin 类时检查自动纳入，不需硬编码类名。</li>
+</ul>
+<div class="ok">
+<strong>闸门的语义是「变更必须显式登记」，不是「禁止增长」。</strong> 2026-10-08 已删除原「注入点总数只减不增」要求。
+</div>
+
+<h2>新增注入点的流程</h2>
+<ol>
+<li><strong>评估复用</strong> —— 现有 20 多个点里有没有语义相同或更早的锚点？能复用就零新增。这正是派发器的价值：加订阅不用加锚点。</li>
+<li><strong>选址</strong> —— 生命周期边界 → 方法 HEAD / TAIL / RETURN → 谨慎用 <code>INVOKE</code> → <strong>避免</strong> <code>CONSTANT</code> / 高 ordinal。锚在热路径时必须<strong>单独论证</strong>并说明性能影响。</li>
+<li><strong>写 mixin</strong> —— 可链式注入器、<code>require = 1</code>、每点 1 条指令、不改控制流与类结构；目标名用官方名并人工复核。</li>
+<li><strong>登记</strong> —— 同一次变更里改三处：注入面台账的表行<strong>与</strong>摘要行 + 变更记录、<code>InjectionLedger.ENTRIES</code> 镜像条目、四面校验基线的两个常量。库模组提供的点另在 <code>brush-api.mixins.json</code> 登记。</li>
+<li><strong>跑门禁</strong> —— <code>gradlew footprintCheck</code>必须 PASS；未登记漂移 = FAIL 并列出问题清单。</li>
+<li><strong>三运行时实测确认</strong> —— 「新增 / 修改注入点时仍必须实测确认，不得假定」：宿主改过的字节码可能让注入点失配。每个阶段汇报都要附 footprint 台账的变化。</li>
+</ol>
+
+<h2>已废弃方案清单（防止走回头路）</h2>
+<p>以下内容讨论或实现过、<strong>现均已废弃</strong>，不要再实现或恢复：</p>
+<table>
+<tr><th>废弃项</th><th>原因</th></tr>
+<tr><td>vanilla 字节码重映射</td><td>26.1.2 未混淆，无 jar 可重映射</td></tr>
+<tr><td>加载期 mod 重映射 / intermediary 作为运行时命名空间</td><td>三运行时统一官方名，单 jar 天然满足；Intermediary / Yarn 已于 1.21.11 后停止更新</td></tr>
+<tr><td>refmap / 合成 intermediary → mojmap 映射表</td><td>三运行时同名，无需转换；且 NeoForge 侧写了会坏</td></tr>
+<tr><td>目标版本 1.21.1 / Java 21</td><td>已改为 26.1.2 + Java 25</td></tr>
+<tr><td>P5 生态兼容层</td><td>overlay 模式下宿主自己加载它生态的 mod，P5 降级为长线可选</td></tr>
+<tr><td>S4 同一实例内 Fabric mod 与 Neo mod 并存</td><td>本质是「一个宿主 + 一个翻译层」工程，工作量与本项目同级</td></tr>
+<tr><td><strong>「注入点总数只减不增」准则</strong></td><td><strong>2026-10-08 由用户修订</strong>：要求是<strong>薄注入</strong>，不是「绝对少的修改」—— 只要不引入兼容问题，<strong>就可以添加新的注入点</strong>。薄注入形态约束与台账登记要求不变；T4 断言随之改为「注入面变更必须显式登记」</td></tr>
+</table>
+<div class="note">
+<strong>别把「核心点数下降」读作改动面减少</strong> —— Phase C 把网络 / HUD / 输入 / 创造栏等能力搬进第一方库模组 <code>brush-api</code> 后，注入点跨 jar 分散，但台账总数不变：那只是搬家，不是减少。
+</div>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

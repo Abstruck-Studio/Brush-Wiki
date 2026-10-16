@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>维护说明 / 内容口径 · Brush Wiki</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-root="">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+
+<h1>维护说明 / 内容口径</h1>
+
+<p class="lead">
+本页写给<strong>维护者</strong>：站点怎么组织、怎么加页面、有哪些样式可用、以及本站的内容纪律。
+</p>
+
+<h2>本站是什么</h2>
+
+<p>Brush的<strong>离线静态 Wiki</strong>：
+双击 <code>index.html</code> 即可在浏览器打开，<strong>不需要服务器、不联网、不加载任何外部资源</strong>
+下载后即可独立阅读 ——
+本站<strong>不引用站点之外的文件</strong>，也不指向任何本地路径。</p>
+
+<h2>结构</h2>
+
+<pre><code>Brush Wiki/
+├─ index.html            站点入口（三运行时对照 + 快速开始 + 按角色阅读）
+├─ maintenance.html      本页
+├─ assets/
+│   ├─ style.css         全站样式（含暗色自适应与代码高亮配色）
+│   ├─ nav.js            侧栏导航 + 页面过滤搜索 + 代码块复制按钮 + 挂载高亮脚本
+│   └─ highlight.js      离线语法高亮（自动识别 Java / Groovy / BAT / JSON / properties）
+├─ brush/                第一部分：Brush（加载器）—— 11 页
+│   overview / startup / injection / dispatch / mods / runtimes /
+│   resources / build / limits / diagnostics / faq
+└─ api/                  第二部分：Brush API（能力库）—— 9 页
+    overview / first-mod / content / network / ui / data / events / platform / reference</code></pre>
+
+<h2>加一个页面</h2>
+
+<ol>
+  <li>复制任一现有页面的骨架（<code>&lt;!DOCTYPE html&gt;</code> → <code>&lt;body data-root="../"&gt;</code> →
+      <code>&lt;div id="layout"&gt;&lt;aside id="sidebar"&gt;&lt;/aside&gt;&lt;main&gt;…&lt;/main&gt;&lt;/div&gt;</code> →
+      <code>&lt;script src="../assets/nav.js"&gt;&lt;/script&gt;</code>），写正文；</li>
+  <li>到 <code>assets/nav.js</code> 的 <code>NAV</code> 数组里登记一行 <code>{ href: 'brush/xxx.html', title: '…' }</code>
+      —— <strong>侧栏完全由 <code>nav.js</code> 生成</strong>，页面里不写任何导航；</li>
+  <li>根目录的页面写 <code>data-root=""</code>，<code>brush/</code> 与 <code>api/</code> 下的页面写 <code>data-root="../"</code>。
+      写错会让样式与脚本路径失效。</li>
+</ol>
+
+<h2>可用的样式</h2>
+
+<p>全部定义在 <code>assets/style.css</code>，<strong>不要内联 <code>&lt;style&gt;</code></strong>：</p>
+
+<table>
+<tr><th>类名</th><th>用途</th></tr>
+<tr><td><code>lead</code></td><td>页首摘要段</td></tr>
+<tr><td><code>note</code> / <code>warn</code> / <code>ok</code></td><td>三种提示框</td></tr>
+<tr><td><code>cards</code> &gt; <code>card</code></td><td>卡片网格（卡片内放 <code>&lt;h3&gt;</code> + <code>&lt;p&gt;</code>）</td></tr>
+<tr><td><code>badge</code></td><td>小标签（如 S1 / S2 / S3）</td></tr>
+<tr><td><code>kv</code></td><td>定义表（<code>&lt;dl&gt;</code> + <code>&lt;dt&gt;</code>/<code>&lt;dd&gt;</code>）</td></tr>
+<tr><td><code>muted</code></td><td>次要小字</td></tr>
+<tr><td><code>table</code></td><td>带边框的表格</td></tr>
+<tr><td><code>&lt;pre&gt;&lt;code&gt;</code></td><td>代码块</td></tr>
+</table>
+
+<h2>代码高亮</h2>
+
+<p>把代码放进 <code>&lt;pre&gt;&lt;code&gt;…&lt;/code&gt;&lt;/pre&gt;</code> 即可：
+<code>highlight.js</code> 会按内容判断语言（Java / Groovy / BAT / JSON / properties）并上色。
+<strong>判断不出的内容一律保持原样</strong> —— 控制台日志、目录树、Gradle 输出不会被染花。
+配色改 <code>style.css</code> 里的 <code>--tok-*</code> 变量即可，明暗两套自动切换。</p>
+
+<h2>内容纪律</h2>
+
+<ul>
+  <li><strong>只写有支撑的结论</strong>：代码与类注释是签名与语义的权威；运行时行为以启动日志、
+      自检报告与实机探针为准。凡属推测、未实测或依赖他人环境的判断，一律显式写「未验证」。</li>
+  <li><strong>不引用站点之外的文件</strong>：正文与页脚都不出现内部文档名或源码路径；
+      用「项目纪律」「设计文档记载」「实测结论台账」「注入面台账」「源码注释」这类说法替代。</li>
+  <li><strong>保留读者手上的工程构件名</strong>：构建脚本、模组元数据文件、配置属性、
+      运行目录与日志文件名，以及类名 / 方法名 / 任务名 / 属性名 / 日志原文 —— 这些是读者自己也会看到的东西。</li>
+  <li><strong>正文不使用解释性括号</strong>：正文中的 <code>（…）</code> 一律不写，需要说明就写成正常句子。
+      <strong>单位与数量、标识符标注（代码 / API / 类名 / 命令 / 版本号与编号）、标题与结构名、页脚、代码块不受此限。</strong></li>
+</ul>
+
+<h2>保留括号清单</h2>
+
+<p>正文里只留下<strong>两类</strong>括号，其余一律不写：</p>
+
+<ul>
+  <li><strong>单位与数量</strong>：<code>（约 66 KB）</code>、<code>（394,153 B）</code>、<code>（9 例）</code>、<code>（当前 21 点 / 16 类）</code>。</li>
+  <li><strong>标识符标注</strong>：括号里是代码 / API / 类名 / 方法名 / 命令 / 版本号 / 编号，如
+      <code>（brush.mod.json）</code>、<code>（S1/S2/S3）</code>、<code>（T1–T4）</code>、<code>（26.10.1）</code>。</li>
+</ul>
+
+<p>此外，<strong>代码块</strong>、<strong>标题与结构名</strong>（含导航节名、页名链接文字）与<strong>页脚</strong>里的括号属于结构位置，不在此口径约束内，全部原样保留。</p>
+
+<p class="muted">口径只规定"哪些括号可以留"，不记录逐页数量 —— 数量会随页面更新而漂移，写死在文档里必然过期。要核对某一页，直接读该页正文即可。</p>
+
+<h2>当前登记的未验证 / 人工项</h2>
+
+<dl class="kv">
+  <dt>宿主 mod 条数</dt><dd>随宿主版本变动 —— 页面只写稳定成员，不写死条数</dd>
+  <dt>资源包注册</dt><dd>是否存在其它受支持的注册途径，未验证</dd>
+  <dt>数据包标签目录</dt><dd>是否桥接，未验证</dd>
+  <dt>存档数据包</dt><dd>「目录发现」环节仍需人工验证</dd>
+  <dt>API 类型计数</dt><dd>人工清点</dd>
+  <dt>观感类结论</dt><dd>像素级外观、按键手感等仍需人工确认</dd>
+</dl>
+
+<h2>与项目内部文档的已知差异</h2>
+
+<div class="warn">
+本 Wiki 一律按<strong>代码真实行为</strong>写。若内部纪律文档与代码不一致，以代码为准，并在页面里如实登记差异。
+当前已知两处：① 内部文档把「启动期扫描独占式注入并告警」列为一道防线，而该扫描器已撤销
+—— 实际防线是注入校验硬失败 + 宿主/mixin 冲突日志 + 薄注入选址；
+② 内部文档提到的某个宿主适配抽象类在代码里并不存在，实际形态是宿主包与中性接缝。
+</div>
+
+<h2>事实抽查记录（2026-10-16）</h2>
+
+<ul>
+  <li>21 个内容页 + 本站 + 3 个资源文件；<strong>站内链接零死链</strong>；各页模板引用全部合规。</li>
+  <li>逐文件按 UTF-8 严格校验：<strong>无 BOM、无乱码</strong>。</li>
+  <li>页面提到的任务名、属性名、类名与方法名、关键数字
+      全部与实际工程对账通过。</li>
+  <li>全站复核：<strong>不再出现对站点之外文件的任何引用或链接</strong>。</li>
+</ul>
+
+<p class="muted">站点描述的是 Brush 26.10.1 / 目标 MC 26.1.2 / Java 25 / Gradle 9.8.1 的形态；
+20 个内容页由 7 个子代理并行撰写，随后统一做结构、链接、编码与事实校验。</p>
+
+<footer>
+Brush Wiki · 本页依据站点自身结构与校验记录（2026-10-16）
+</footer>
+
+</main>
+</div>
+<script src="assets/nav.js"></script>
+</body>
+</html>

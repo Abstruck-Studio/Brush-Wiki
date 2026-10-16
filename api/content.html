@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>内容注册 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>内容注册</h1>
+<p class="lead">内容注册只能在 <code>BrushEvents.CONTENT_REGISTRATION</code> 的监听器体内执行 —— 那是 vanilla 注册表唯一的合法窗口。本页给出窗口的边界与真实报错、<code>BrushRegistry</code> 的完整公开方法表、创造栏的两条路径，以及一段可编译的注册代码。</p>
+
+<h2>一、唯一的注册窗口：不是约定，是硬约束</h2>
+
+<p>vanilla 把注册夹在一对守卫之间，两个方向都会失败 —— 报错原文如下：</p>
+
+<ul>
+<li><b>太早</b>：<code>IllegalArgumentException: Not bootstrapped (called from registry ...)</code>。更早触碰注册表类就会被拦，随后 <code>ExceptionInInitializerError</code> 会污染该类。</li>
+<li><b>太晚</b>：<code>IllegalStateException: Registry is already frozen</code>。</li>
+</ul>
+
+<p>合法窗口 = <code>BuiltInRegistries.bootStrap()</code> 的 <b>HEAD</b>（L1 注入点 <code>registries.bootstrap</code>）。此时 <code>Bootstrap.isBootstrapped</code> 标志已置位、注册表尚未 <code>freeze()</code>。L1 派发链是 mixin → <code>Dispatcher.fire</code> → 你的监听器，三运行时施加同一份 mixin 配置。</p>
+
+<dl class="kv">
+<dt>频率</dt><dd>每进程<b>恰一次</b>。</dd>
+<dt>触发线程</dt><dd>执行 bootstrap 的线程。实测：S1 为游戏主线程；S2 为 <b>Render 线程</b>；S3 为宿主 bootstrap 线程（<code>pool-9-thread-1</code>）。</dd>
+<dt>插入序</dt><dd>vanilla 的方块 / 物品等内容类已在 <code>Bootstrap</code> 流程前段完成自注册 ⇒ <b>你的条目追加在 vanilla 条目之后</b>。</dd>
+<dt>异常</dt><dd>监听器异常经 <code>Dispatcher</code> 包装上抛 → <b>启动快速失败</b>，不会静默。</dd>
+</dl>
+
+<h2>二、ContentRegistrationEvent 携带什么</h2>
+
+<p>答案是：<b>什么都不带</b>。它是无载荷单例（<code>ContentRegistrationEvent.INSTANCE</code>），既没有注册表上下文，也<b>没有"是否客户端"标志</b>。javadoc 明确要求：请勿依赖对象身份做去重或状态存储 —— 需要用闭包或自己的静态字段带状态。</p>
+
+<p>归账归属不来自事件对象，而来自 <code>ModBootstrap</code> 在入口构造期设置的 mod 上下文：<code>Event#register</code> 把该上下文包进 L1 监听器，窗口到达、监听器执行时再恢复 —— 所以 S3 下即使 bootstrap 在别的线程，归属依然正确。</p>
+
+<div class="note">需要"当前是客户端还是专用服务端"时，<b>当前 L2 面没有这个信息</b>。Brush 现有三种运行时（S1/S2/S3）<b>全是客户端</b>，<code>entrypoints.server</code> 只被校验、不被派发。</div>
+
+<h2>三、BrushRegistry 公开方法表</h2>
+
+<p>类别短名来自注册表标识的路径段（<code>minecraft:item</code> → <code>item</code>），所以泛型核心对任意 <code>Registry&lt;T&gt;</code> 可用，类别扩张零核心改动 —— 便捷形只是糖。</p>
+
+<table>
+<thead><tr><th>签名</th><th>用途 / 调用窗口</th></tr></thead>
+<tbody>
+<tr><td><code>static &lt;T&gt; T register(Registry&lt;T&gt; registry, Identifier id, T value)</code></td><td>泛型注册核心：向任意注册表注册一个值。等价于 <code>Registry.register(registry, ResourceKey.create(registry.key(), id), value)</code>。<b>内容窗口内</b>。</td></tr>
+<tr><td><code>static Item registerItem(Identifier id, Item.Properties properties)</code></td><td>注册物品：<code>properties.setId(key)</code> → <code>new Item(props)</code> → 注册。窗口内。</td></tr>
+<tr><td><code>static Item registerItem(Identifier id, Function&lt;Item.Properties, Item&gt; factory)</code></td><td>注册自定义 <code>Item</code> 子类；工厂收到<b>已 <code>setId</code></b> 的 properties。窗口内。</td></tr>
+<tr><td><code>static Block registerBlock(Identifier id, Function&lt;BlockBehaviour.Properties, Block&gt; factory, BlockBehaviour.Properties properties)</code></td><td>注册方块 + <b>同名 <code>BlockItem</code> 配对</b>。窗口内。</td></tr>
+<tr><td><code>static Block registerBlock(Identifier id, Function&lt;BlockBehaviour.Properties, Block&gt; factory, BlockBehaviour.Properties properties, BiFunction&lt;Block, Item.Properties, Item&gt; itemFactory)</code></td><td>同上，但配对物品由你生产。工厂返回 null = <b>失败</b>，不是"无物品"。</td></tr>
+<tr><td><code>static Block registerBlockWithoutItem(Identifier id, Function&lt;BlockBehaviour.Properties, Block&gt; factory, BlockBehaviour.Properties properties)</code></td><td>"有方块无物品"的<b>具名入口</b>：不构造物品、不写 <code>Item.BY_BLOCK</code>，但窗口守卫 / 归账 / <code>finalizeBlockStates</code> 与配对形一致。</td></tr>
+<tr><td><code>static &lt;T extends Entity&gt; EntityType&lt;T&gt; registerEntityType(Identifier id, EntityType.Builder&lt;T&gt; builder)</code></td><td>实体类型：<code>builder.build(key)</code> + 注册。窗口内。</td></tr>
+<tr><td><code>static &lt;T extends LivingEntity&gt; void registerAttributes(EntityType&lt;T&gt; type, Supplier&lt;AttributeSupplier.Builder&gt; builder)</code></td><td><b>延迟内容组</b>：参数是 supplier，不在现场求值 —— 缓冲到客户端注册 flush 才执行。
+</td></tr>
+<tr><td><code>static &lt;T extends Mob&gt; void registerSpawnPlacement(EntityType&lt;T&gt; type, SpawnPlacementType placement, Heightmap.Types heightmapType, SpawnPlacements.SpawnPredicate&lt;T&gt; predicate)</code></td><td>刷怪放置规则。窗口内。</td></tr>
+<tr><td><code>static &lt;T extends BlockEntity&gt; BlockEntityType&lt;T&gt; registerBlockEntityType(Identifier id, BrushRegistration.BrushBlockEntitySupplier&lt;T&gt; supplier, Block... blocks)</code></td><td>方块实体类型；<code>blocks</code> 至少一个。窗口内。</td></tr>
+<tr><td><code>static &lt;M extends AbstractContainerMenu&gt; MenuType&lt;M&gt; registerMenuType(Identifier id, BrushRegistration.BrushMenuSupplier&lt;M&gt; supplier)</code></td><td>菜单类型，<code>requiredFeatures</code> 取空集。窗口内。</td></tr>
+<tr><td><code>static &lt;M extends AbstractContainerMenu&gt; MenuType&lt;M&gt; registerMenuType(Identifier id, BrushRegistration.BrushMenuSupplier&lt;M&gt; supplier, FeatureFlagSet requiredFeatures)</code></td><td>显式特征门控变体。窗口内。</td></tr>
+<tr><td><code>static &lt;T extends Entity&gt; void registerEntityRenderer(EntityType&lt;? extends T&gt; type, EntityRendererProvider&lt;T&gt; provider)</code></td><td><b>客户端组</b>：写 <code>EntityRenderers</code> 的私有 Map；任意时机可调用，内部缓冲到 <code>CLIENT_REGISTRATION</code> 统一落地；过晚显式拒绝。</td></tr>
+<tr><td><code>static &lt;T extends BlockEntity, S extends BlockEntityRenderState&gt; void registerBlockEntityRenderer(BlockEntityType&lt;? extends T&gt; type, BlockEntityRendererProvider&lt;T, S&gt; provider)</code></td><td>方块实体渲染器（26.1.2 为双参 provider）。时机同上。</td></tr>
+<tr><td><code>static &lt;M extends AbstractContainerMenu, S extends Screen &amp; MenuAccess&lt;M&gt;&gt; void registerMenuScreen(MenuType&lt;M&gt; type, BrushRegistration.BrushScreenFactory&lt;M, S&gt; factory)</code></td><td>菜单屏幕映射。时机同上。</td></tr>
+<tr><td><code>static &lt;T&gt; Optional&lt;Registry&lt;T&gt;&gt; dataRegistry(ResourceKey&lt;? extends Registry&lt;T&gt;&gt; key)</code></td><td><b>数据包注册表读取</b>。无窗口约束，任意时机可调用；装载前为空。注册表在 Brush 自有 RegistryAccess 中，<b>对 vanilla 服务器注册表查询不可见</b>；远端多人服务器下恒为空。</td></tr>
+</tbody>
+</table>
+
+<p>方块的 <code>finalizeBlockStates</code> 不是可选项：26.1.2 不在 <code>Block</code> 构造时分配 state 的网络 id 与渲染缓存，而是在 <code>Blocks</code> 类初始化末尾对"当时已注册的全部方块"集中补做。我们的注册晚于那个集中点，所以门面替你补 <code>Block.BLOCK_STATE_REGISTRY.add(state)</code> 与 <code>state.initCache()</code>。漏做的实机后果是两个：放置方块的玩家被踢（<code>Can't find id ... IdMapper</code>）与邻居面遮挡查询 NPE。</p>
+
+<div class="warn">因此<b>不要</b>用通用形 <code>register(BuiltInRegistries.BLOCK, id, block)</code> 表达"无物品方块" —— 那会漏掉 <code>finalizeBlockStates</code>。用 <code>registerBlockWithoutItem</code>。</div>
+
+<h2>四、BrushRegistration 的定位</h2>
+
+<p><code>BrushRegistration</code> 不是注册入口，而是<b>注册辅助函数式接口的容器</b>。存在的理由很具体：26.1.2 的对应 vanilla 参数类型是<b>包私有</b>的，mod 侧连书写都做不到。所以 Brush 暴露收窄到公开类型的等价接口，运行时经 <code>MethodHandles</code> 适配到 vanilla 的包私有形。</p>
+
+<table>
+<thead><tr><th>接口</th><th>方法</th><th>对位的 vanilla 类型</th></tr></thead>
+<tbody>
+<tr><td><code>BrushRegistration.BrushMenuSupplier&lt;M&gt;</code></td><td><code>M create(int containerId, Inventory inventory)</code></td><td><code>MenuType$MenuSupplier</code></td></tr>
+<tr><td><code>BrushRegistration.BrushScreenFactory&lt;M, S&gt;</code></td><td><code>S create(M menu, Inventory inventory, Component title)</code></td><td><code>MenuScreens$ScreenConstructor</code></td></tr>
+<tr><td><code>BrushRegistration.BrushBlockEntitySupplier&lt;T&gt;</code></td><td><code>T create(BlockPos pos, BlockState state)</code></td><td><code>BlockEntityType$BlockEntitySupplier</code></td></tr>
+</tbody>
+</table>
+
+<p>签名镜像<b>语义</b>而非 1:1 抄 vanilla，并收窄到公开类型：vanilla 侧包私有签名一变，改的是 <code>registry</code> 包内的桥接，不动这些接口。这些工厂对象在构造期不得触碰游戏状态 —— 它们只在菜单 / 屏幕 / 方块实体被创建时回调。</p>
+
+<h2>五、归账与自检里的佐证</h2>
+
+<p>每次成功注册都会落进 <code>ContentLedger</code> 并打一行日志：<code>[brush] content: registered &lt;type&gt; &lt;id&gt; (by &lt;modId&gt;)</code>。被拒绝的注册同样归账（<code>recordRejection</code>），并抛带指引的可读异常。自检报告里的行是 <code>content.registered: items=N, blocks=M, tabs=T</code>；<b>退出码位 16 = 内容归账不自洽</b>。</p>
+
+<p>一个容易踩的算术：<code>registerBlock</code> 的配对物品<b>本身就是一条 ITEM 注册表条目</b>。所以示例 mod 注册 1 个物品 + 1 个方块，实测行是 <code>items=2, blocks=1, tabs=0</code>：</p>
+
+<pre><code>[brush] content: registered item example:ruby (by example)
+[brush] content: registered block example:ruby_block (by example)
+[brush] content: registered item example:ruby_block (by example)   &lt;- BlockItem 配对
+[brush] selftest: content.registered: items=2, blocks=1, tabs=0</code></pre>
+
+<p><code>registerBlockWithoutItem</code> 只记 <code>block</code> 一条 —— 自检报告据此能把"有方块无物品"与"漏配物品"区分开。</p>
+
+<h2>六、创造栏：两条路径</h2>
+
+<p>vanilla 14 个标签页的 <code>(row, column)</code> 槽位<b>全部占满</b>，而 <code>Bootstrap#bootStrap()</code> 在生产路径上无条件调用 <code>CreativeModeTabs.validate()</code> —— 自注册新标签页会产生重复槽位并<b>直接中止启动</b>。因此 Brush 走两条完全不同的路径：</p>
+
+<table>
+<thead><tr><th></th><th>向原版标签页追加条目</th><th>注册自有标签页</th></tr></thead>
+<tbody>
+<tr><td>入口</td><td><code>BrushCreativeTabs.entriesOf(Identifier)</code> 或 <code>entriesOf(ResourceKey&lt;CreativeModeTab&gt;)</code>，返回一个 <code>Event</code></td><td><code>BrushCreativeTabs.register(BrushCreativeTab)</code></td></tr>
+<tr><td>落到哪里</td><td>原版标签页的<b>内容集合</b>，条目出现在标签页末尾</td><td><b>不进任何注册表</b>：进 Brush 自维护列表，展示在创造栏左侧的 Brush 侧栏</td></tr>
+<tr><td>调用时机</td><td>订阅与其它事件同一时机</td><td><b>须在 <code>onInitializeClient()</code> 的上下文内</b></td></tr>
+<tr><td>每次构建回调</td><td>是（<code>CreativeTabOutputEvent</code>）</td><td>是</td></tr>
+<tr><td>可否注册进 <code>CREATIVE_MODE_TAB</code></td><td>—</td><td><b>不可以</b>：<code>BrushRegistry</code> 对该注册表直接拒收，理由与指引写进异常</td></tr>
+</tbody>
+</table>
+
+<h3>追加条目：CreativeTabOutputEvent 的时机</h3>
+
+<p>L1 来源是 <code>CreativeModeTab#buildContents</code> 的 <b>TAIL</b>（<code>creative.tab.output</code>）。TAIL 时 <code>displayItems</code> 与 <code>displayItemsSearchTab</code> 两个集合都已赋值完毕，所以句柄能对<b>同一个集合实例</b>原位追加。回调发生在<b>每次构建</b>：标签页首建 / 重开创造界面重建 / 搜索刷新批量重建。</p>
+
+<dl class="kv">
+<dt>不跨构建累积</dt><dd>vanilla 每次构建都重建内容集合，所以对同一构建的重复调用不会累积条目。</dd>
+<dt>同一构建内重复 add</dt><dd>同一 <code>ItemStack</code> 加两次会在标签页内容里产生重复项；搜索页是 <code>Set</code>，自动去重。</dd>
+<dt>写入线程</dt><dd>调用线程 = 触发线程，与 vanilla 生成器写同一集合同线程。</dd>
+</dl>
+
+<p><b>自有页与创造搜索栏</b>：自有页不进注册表，而原版搜索页是在 <code>CreativeModeTabs#buildAllTabContents</code>
+的<b>第二趟</b>里由<b>注册表页签</b>聚合而成的 —— 若不做处理，自有页的物品在创造搜索栏里<b>搜不到</b>。
+现在核心会在<b>首次注册自有页</b>时装一个内部监听器观察同一钩子：
+当被构建的页签是搜索页时，用同一份显示参数重建各自有页、并把它们的
+<b>搜索集合</b>并入搜索页 —— 因此 <code>TAB_AND_SEARCH</code> 与 <code>SEARCH_ONLY</code> 的条目
+<b>都能搜到</b>，而 <code>TAB_ONLY</code> 的仍只在页签里可见。</p>
+
+<p><code>CreativeTabEntries</code> 是句柄，只在一次监听器调用内有效：</p>
+
+<table>
+<thead><tr><th>成员</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><code>ResourceKey&lt;CreativeModeTab&gt; tab()</code></td><td>本次构建的标签页键。</td></tr>
+<tr><td><code>void add(ItemStack stack)</code></td><td>追加条目，等同 <code>TAB_AND_SEARCH</code>。</td></tr>
+<tr><td><code>void add(ItemStack stack, Visibility visibility)</code></td><td>按可见性追加。</td></tr>
+<tr><td><code>boolean shouldShowOpRestrictedItems()</code></td><td>当前显示参数是否放行 OP 限定条目。</td></tr>
+<tr><td><code>FeatureFlagSet enabledFeatures()</code></td><td>当前显示参数启用的特征集。</td></tr>
+<tr><td><code>enum Visibility</code></td><td><code>TAB_AND_SEARCH</code>/ <code>TAB_ONLY</code> / <code>SEARCH_ONLY</code>。</td></tr>
+</tbody>
+</table>
+
+<h3>自有标签页：BrushCreativeTab</h3>
+
+<pre><code>BrushCreativeTabs.register(BrushCreativeTab
+        .builder(Identifier.fromNamespaceAndPath("example", "rubies"))
+        .title(Component.translatable("example.tab.rubies"))
+        .icon(() -&gt; new ItemStack(MY_ITEM))          // 每次渲染求值：勿在供应商里做重活
+        .contents(entries -&gt; entries.add(new ItemStack(MY_ITEM)))
+        .build());</code></pre>
+
+<p>三个要素（title / icon / contents）都必需，缺一即构造期 <code>IllegalStateException</code>。title / icon / contents 全部<b>惰性</b>：图标供应商与内容生成器都在游戏就绪后才求值 —— 因此入口构造期注册是安全的。自有页在 S2 下还需为桥页补 Fabric 分页页码，这是宿主特有情形的已知差异。</p>
+
+<div class="note">自有页<b>不调用</b> vanilla <code>buildContents</code>：Fabric API 对该方法的 TAIL 注入里有一句 <code>getResourceKey(this).orElseThrow(() -&gt; new IllegalStateException("Unregistered creative mode tab"))</code>，未注册页调用它必抛。Brush 改为在公开集合访问面上 clear 后全量重填 —— 三运行时同一代码路径，副作用是 <code>creative.tab.output</code> <b>不为自有页触发</b>。</div>
+
+<h2>七、一段完整的注册代码</h2>
+
+<p>物品 + 方块 + 向原版「原材料」页追加条目。这是完整可编译的类：</p>
+
+<pre><code>package com.example.mdk;
+
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockBehaviour;
+
+import org.abstruck.brush.api.BrushCreativeTabs;
+import org.abstruck.brush.api.BrushEvents;
+import org.abstruck.brush.api.BrushModInitializer;
+import org.abstruck.brush.api.BrushRegistry;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+public final class ExampleContentMod implements BrushModInitializer {
+
+    private static final Logger LOGGER = LogManager.getLogger("mdkexample");
+
+    public static final String MOD_ID = "mdkexample";
+    private static final Identifier WAND = Identifier.fromNamespaceAndPath(MOD_ID, "wand");
+    private static final Identifier WAND_BLOCK = Identifier.fromNamespaceAndPath(MOD_ID, "wand_block");
+
+    /** 内容窗口内写入、更晚的创造栏构建期读取 —— 跨线程读，故 volatile。 */
+    private static volatile Item wand;
+
+    @Override
+    public void onInitialize() {
+        LOGGER.info("[mdkexample] onInitialize -- 只注册监听器，不碰注册表");
+
+        // ① 内容注册：窗口（BuiltInRegistries.bootStrap HEAD）到达时才真正执行
+        BrushEvents.CONTENT_REGISTRATION.register(event -&gt; {
+            wand = BrushRegistry.registerItem(WAND, new Item.Properties());
+
+            // 方块 + 同名 BlockItem 配对（item id 由 block id 派生）
+            Block block = BrushRegistry.registerBlock(WAND_BLOCK,
+                    props -&gt; new Block(props.strength(2.0F, 6.0F)),
+                    BlockBehaviour.Properties.of().requiresCorrectToolForDrops());
+            LOGGER.info("[mdkexample] content: wand=" + wand + ", block=" + block);
+
+            // 数据包注册表（可选）：登记 + 用 BrushRegistry.dataRegistry(key) 读取
+            // BrushDataRegistries.register(MY_REGISTRY_KEY, MyType.CODEC);
+        });
+
+        // ② 创造栏条目：向原版「原材料」页追加（官方名键经 Identifier 构造）
+        BrushCreativeTabs.entriesOf(Identifier.fromNamespaceAndPath("minecraft", "ingredients"))
+                .register(entries -&gt; entries.add(new ItemStack(wand)));
+    }
+}</code></pre>
+
+<p><b>执行时机</b>：<code>onInitialize()</code> 在 <code>bootstrap.early</code> 锚点跑，此时只做两件声明 —— 订阅内容窗口、订阅创造栏条目。① 的 lambda 在 <code>BuiltInRegistries.bootStrap()</code> HEAD 被调用，那里才是合法注册窗口；② 的 lambda 在每次「原材料」页构建时被调用，读的是 ① 写下的 <code>wand</code> —— 所以它必须晚于 ①，而这个顺序由 vanilla 的生命周期本身保证。别在 ② 里访问注册表取值以外的东西。</p>
+
+<p>延伸阅读：<a href="network.html">网络</a>、<a href="ui.html">界面与输入</a>、<a href="reference.html">API 参考索引</a>；窗口背后的注入点与事件源见 <a href="../brush/dispatch.html">派发层与事件</a>。</p>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>界面与输入 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>界面与输入</h1>
+<p class="lead">本页覆盖 Brush API 的界面与输入面：屏幕事件（<code>SCREEN_INIT</code> / <code>SCREEN_RESIZE</code>）、
+HUD 抽取事件（<code>HUD_EXTRACT</code>）、键位注册（<code>BrushKeybinds</code>）与三个原始输入事件
+（<code>INPUT_KEY_PRESS</code> / <code>INPUT_MOUSE_BUTTON</code> / <code>INPUT_MOUSE_SCROLL</code>），
+以及创造栏相关的两个面。
+每个事件都标出触发时机、所在线程、可取消性与三运行时一致性。</p>
+
+<h2>0. 先说结论：这一层的四件事</h2>
+
+<table>
+<tr><th>面</th><th>入口</th><th>你拿到的载荷</th><th>典型用途</th></tr>
+<tr><td>屏幕</td><td><code>BrushEvents.SCREEN_INIT</code> / <code>SCREEN_RESIZE</code></td><td>vanilla <code>Screen</code> 实例本身</td><td>往标题界面加自己的按钮、随缩放重排布局</td></tr>
+<tr><td>HUD</td><td><code>BrushEvents.HUD_EXTRACT</code></td><td><code>GuiGraphicsExtractor</code> + <code>DeltaTracker</code></td><td>在 vanilla HUD 之后追加绘制</td></tr>
+<tr><td>键位</td><td><code>BrushKeybinds.register</code> / <code>registerCategory</code></td><td>—</td><td>注册一个出现在原版「控制」界面、可改键、写 options.txt 的按键</td></tr>
+<tr><td>输入</td><td><code>BrushEvents.INPUT_KEY_PRESS</code> 等三个</td><td>GLFW 原始值</td><td>原始按键回调、滚轮、鼠标键</td></tr>
+</table>
+
+<div class="note">
+<strong>统一前提。</strong> 这些监听器都通过 <code>Event#register(listener)</code> 注册，注册动作线程安全、
+可在 mod 入口构造期完成，且<b>不解析任何 MC 类型</b>——
+与加载期无关的注册安全性见 <a href="events.html">事件总表</a>「注册时机」节。
+</div>
+
+<h2>1. 屏幕事件：<code>SCREEN_INIT</code> 与 <code>SCREEN_RESIZE</code></h2>
+
+<h3>1.1 触发点</h3>
+
+<p>两个事件都锚在 vanilla <code>Screen</code> 的方法 TAIL，<b>0 新增 footprint</b>：</p>
+
+<table>
+<tr><th>事件</th><th>L1 注入点</th><th>触发时机的精确含义</th><th>线程</th><th>可取消</th><th>三运行时</th></tr>
+<tr>
+<td><code>SCREEN_INIT</code></td>
+<td><code>Screen#init(int,int)</code> TAIL</td>
+<td>该屏 widget 已就绪：首次显示 = 子类 <code>init()</code> 完成态；同一实例重复 <code>init</code> = 「先清后建」完成态。<b>对所有屏幕派发</b></td>
+<td>游戏主线程</td>
+<td>否</td>
+<td>一致</td>
+</tr>
+<tr>
+<td><code>SCREEN_RESIZE</code></td>
+<td><code>Screen#resize(int,int)</code> TAIL</td>
+<td>窗口缩放完成，widget 已按新尺寸「先清后建」完毕</td>
+<td>游戏主线程</td>
+<td>否</td>
+<td>一致</td>
+</tr>
+</table>
+
+<p>两条路径<b>互不覆盖</b>：缩放走 <code>Minecraft.resizeGui()</code> → <code>Window.setGuiScale</code> →
+<code>Screen#resize</code>，<b>不经过</b> <code>init(II)</code>。所以只订阅 <code>SCREEN_INIT</code> 会在窗口缩放后丢失布局。</p>
+
+<h3>1.2 用法：往标题界面加自己的按钮</h3>
+
+<p>事件对<b>所有</b>屏幕派发，类型过滤是监听器的职责。下面的模式是幂等的，
+能同时承受重复 <code>init</code> 与缩放：</p>
+
+<pre><code>import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.screens.TitleScreen;
+import net.minecraft.network.chat.Component;
+
+import org.abstruck.brush.api.BrushEvents;
+
+private static Button myButton;
+
+// 注册期 = mod 入口（onInitialize / onInitializeClient），游戏尚未就绪
+BrushEvents.SCREEN_INIT.register(screen -&gt; {
+    if (!(screen instanceof TitleScreen)) {
+        return;                       // 类型过滤：只处理标题界面
+    }
+    if (myButton != null) {
+        screen.removeWidget(myButton); // 先移除：重复 init 不会留下第二个按钮
+    }
+    myButton = Button.builder(Component.literal("My Button"), b -&gt; {
+        // 点下去做什么
+    }).bounds(4, 4, 100, 20).build();
+    screen.addRenderableWidget(myButton);
+});
+</code></pre>
+
+<div class="warn">
+<strong>两个坑。</strong>
+<ul>
+<li><b>初始化期不要碰 MC 类。</b> 屏幕事件是「注入点的 TAIL」，TAIL 时刻 widget 已就绪 ——
+但 <b>Brush 事件注册路径本身不解析 MC 类型</b>，所以入口构造期注册监听器是安全的；
+真正不安全的是在入口构造期就<b>直接引用</b>注册表 / 客户端单体。MC 类型只能出现在监听器 lambda 体内。</li>
+<li><b>窗口缩放会重建控件。</b> vanilla 的 <code>rebuildWidgets()</code> = <code>clearWidgets()</code> +
+<code>clearFocus()</code> + <code>init()</code> + <code>setInitialFocus()</code> —— 你上一次添加的 widget
+会被清掉。所以「只在 <code>SCREEN_INIT</code> 里加一次、之后不管」的写法在缩放后会失效。
+订阅 <code>SCREEN_RESIZE</code> 或采用上面的幂等挂载模式。</li>
+</ul>
+</div>
+
+<p class="muted">出处：<code>BrushEvents</code> javadoc、<code>ScreenInitEvent</code> / <code>ScreenResizeEvent</code> javadoc、
+<code>HookEvents#SCREEN_INIT</code> / <code>#SCREEN_RESIZE</code> javadoc、
+以及界面层设计记载与实测日志。</p>
+
+<h2>2. HUD：<code>HUD_EXTRACT</code></h2>
+
+<h3>2.1 语义</h3>
+
+<dl class="kv">
+<dt>触发时机</dt>
+<dd>每个渲染帧的 vanilla HUD 提取<b>完成之后</b>——
+此刻准星 / 快捷栏 / 聊天等原版元素已全部写入 extractor，你可以继续追加绘制。</dd>
+<dt>线程</dt>
+<dd>渲染线程。</dd>
+<dt>载荷</dt>
+<dd><code>GuiGraphicsExtractor extractor</code> 与 <code>DeltaTracker deltaTracker</code>
+—— 就是目标方法的两个原始参数，对象同一性、每次触发零分配。</dd>
+<dt>频率</dt>
+<dd>热路径：每渲染帧 1 次（约 60–260 次/秒）。<b>无监听器时加载侧零开销</b>；
+有监听器时也零分配。监听器内部应保持廉价。</dd>
+<dt>可取消</dt>
+<dd>否。这是「追加绘制」语义，不是「拦截 / 改写」语义。</dd>
+<dt>三运行时</dt>
+<dd>一致。</dd>
+</dl>
+
+<h3>2.2 坐标系</h3>
+
+<p>用 extractor 自己的 <code>guiWidth()</code> / <code>guiHeight()</code> 定位，<b>不要</b>用物理窗口像素
+—— 那是未缩放尺寸，与绘制坐标系不是一套。
+左上角为原点、y 向下增长。</p>
+
+<h3>2.3 画文字的示例</h3>
+
+<pre><code>import net.minecraft.client.DeltaTracker;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphicsExtractor;
+import net.minecraft.network.chat.Component;
+
+import org.abstruck.brush.api.BrushEvents;
+
+private static final int COLOR_WHITE = 0xFFFFFFFF;
+
+BrushEvents.HUD_EXTRACT.register((extractor, deltaTracker) -&gt; {
+    Minecraft minecraft = Minecraft.getInstance();
+    if (minecraft.player == null) {
+        return;                                  // 不在世界里：不画（廉价早退是热路径纪律）
+    }
+    int x = 6;
+    int y = 6;
+    extractor.text(minecraft.font, Component.literal("Hello HUD"), x, y, COLOR_WHITE);
+});
+</code></pre>
+
+<p class="muted">签名依据：
+<code>GuiGraphicsExtractor.text(Font, Component, int x, int y, int color)</code>、
+<code>fill(RenderPipeline, int, int, int, int, int)</code>、<code>guiWidth()</code> / <code>guiHeight()</code>。
+可参考的真实用例：耐久 HUD mod 的 <code>onHudExtract</code> 与 Brush 自检探针的 <code>drawMarker</code>。</p>
+
+<div class="warn">
+<strong>自检口径。</strong> 自检退出点位于<b>首帧渲染之前</b>，
+因此本事件在自检报告里<b>必然 0 次</b> —— 加载器只对目标类做强制加载 + 方法存在断言，
+实际绘制效果由实机探针覆盖，「好不好看」仍是人工项。
+出处：<code>HudExtractEvent</code> javadoc 与实测日志。
+</div>
+
+<h2>3. 键位：<code>BrushKeybinds</code></h2>
+
+<h3>3.1 注册 API（签名以源码为准）</h3>
+
+<table>
+<tr><th>方法</th><th>签名</th><th>说明</th></tr>
+<tr><td>登记键位</td><td><code>public static KeyMapping register(KeyMapping mapping)</code></td>
+<td>返回<b>同一个实例</b>。抛 <code>NullPointerException</code>（null）/
+<code>IllegalArgumentException</code>/
+<code>IllegalStateException</code>。</td></tr>
+<tr><td>登记分类</td><td><code>public static KeyMapping.Category registerCategory(Identifier categoryId)</code></td>
+<td>26.1.2 起按键分类是<b>注册式 record</b>；不注册则「控制」界面里无处安放。返回值交给 <code>KeyMapping</code> 构造器。</td></tr>
+<tr><td>诊断</td><td><code>public static int registeredCount()</code></td><td>已登记的键位数量。</td></tr>
+</table>
+
+<pre><code>import com.mojang.blaze3d.platform.InputConstants;
+
+import net.minecraft.client.KeyMapping;
+import net.minecraft.resources.Identifier;
+
+import org.abstruck.brush.api.BrushEvents;
+import org.abstruck.brush.api.BrushKeybinds;
+
+// 推荐在 mod 主入口（onInitialize）执行一次 —— 必须早于 Options 构造
+KeyMapping.Category category = BrushKeybinds.registerCategory(
+        Identifier.fromNamespaceAndPath("mymod", "keys"));
+KeyMapping toggle = BrushKeybinds.register(new KeyMapping(
+        "key.mymod.toggle", InputConstants.Type.KEYSYM, 75 /* GLFW_KEY_K */, category));
+
+// 之后在每帧 tick 消费点击（vanilla KeyMapping 的标准用法）
+BrushEvents.CLIENT_TICK.register(event -&gt; {
+    while (toggle.consumeClick()) {
+        // 切换你的开关
+    }
+});
+</code></pre>
+
+<div class="note">
+<strong>为什么键码写 <code>75</code> 而不写 <code>GLFW.GLFW_KEY_K</code>。</strong>
+LWJGL <b>不在</b> mod 的编译类路径上，实测编译报
+<code>程序包 org.lwjgl.glfw 不存在</code>。GLFW 文档规定「可打印键的键码 = 该键在 US 布局下的 ASCII 值」，
+故 <code>K</code> = 75；本项目日志也实证过这条规则（注入 <code>B</code> 时输出 <code>key=B(66)</code>）。
+<code>com.mojang.blaze3d.platform.InputConstants</code> 属于官方名类空间，可以正常 import。
+出处：<code>BrushKeybinds</code> javadoc、设计文档记载与实测日志。
+</div>
+
+<h3>3.2 持久化与「控制」界面</h3>
+
+<p>注册之后<b>一切交给 vanilla</b>：键位进入 <code>Options.keyMappings</code>，于是
+（a）出现在原版「控制」界面；（b）玩家可改键；（c）经 <code>KeyMapping#saveString()</code> 写进 options.txt 并在下次启动载入；
+（d）可用 <code>KeyMapping#isDown()</code> / <code>consumeClick()</code> 查询。
+这与 Fabric（<code>KeyMappingHelper.registerKeyMapping</code>）和 NeoForge（<code>RegisterKeyMappingsEvent#register</code>）
+的口径相同：<b>mod 交一个 vanilla <code>KeyMapping</code>，加载器负责拼进原版数组</b>。</p>
+
+<div class="warn">
+<strong>必须在初始化期登记，否则响亮失败。</strong> <code>Options.keyMappings</code> 是
+<code>public final KeyMapping[]</code>，只在 <code>Options#&lt;init&gt;</code> 里赋值一次，而<b>同一构造器随后还会读它</b>。
+所以构造结束后补写<b>既不可能生效、也会错过那次读</b>。Brush 的选择是：
+这种情况下 <code>register</code> 抛 <code>IllegalStateException</code>。
+三运行时一致：S1 由核心注入点拼接，S2/S3 下我们的注入点与宿主
+<b>同时</b>拼接 —— 都是「把数组接长」，互不抹除。
+出处：<code>BrushKeybinds</code> javadoc、<code>keybind/KeybindRegistry</code> javadoc、设计文档记载。
+</div>
+
+<h2>4. 输入事件：三个 GLFW 原始回调</h2>
+
+<p>先看枚举：<code>InputAction</code> 是 GLFW 动作值的语义化，<code>RELEASE(0)</code> / <code>PRESS(1)</code> /
+<code>REPEAT(2)</code> / <code>UNKNOWN(-1)</code>。
+另有 <code>int id()</code> 取原始值、<code>static InputAction of(int id)</code> 做转换。
+键盘事件可取 <code>RELEASE</code> / <code>PRESS</code> / <code>REPEAT</code>；鼠标按键只有 <code>RELEASE</code> / <code>PRESS</code>。</p>
+
+<table>
+<tr><th>事件常量</th><th>监听器方法</th><th>L1 注入点</th><th>触发时机</th><th>线程</th><th>可取消</th><th>三运行时</th></tr>
+<tr>
+<td><code>INPUT_KEY_PRESS</code></td>
+<td><code>onKeyPress(InputAction, int key, int scancode, int modifiers)</code></td>
+<td><code>KeyboardHandler#keyPress</code> HEAD</td>
+<td>每次按键回调</td>
+<td>游戏主线程</td><td>否</td><td>一致</td>
+</tr>
+<tr>
+<td><code>INPUT_MOUSE_BUTTON</code></td>
+<td><code>onMouseButton(InputAction, int button, int modifiers)</code></td>
+<td><code>MouseHandler#onButton</code> HEAD</td>
+<td>每次鼠标按键回调</td>
+<td>游戏主线程</td><td>否</td><td>一致</td>
+</tr>
+<tr>
+<td><code>INPUT_MOUSE_SCROLL</code></td>
+<td><code>onMouseScroll(double xOffset, double yOffset)</code></td>
+<td><code>MouseHandler#onScroll</code> HEAD</td>
+<td>每次滚轮回调</td>
+<td>游戏主线程</td><td>否</td><td>一致</td>
+</tr>
+</table>
+
+<p>三条语义细节：</p>
+
+<ul>
+<li><b>载荷是 GLFW 原始值</b>，与 vanilla 的 <code>KeyEvent</code> record（<code>key</code> / <code>scancode</code> / <code>modifiers</code>）
+和 <code>MouseButtonInfo</code> record（<code>button</code> / <code>modifiers</code>）字段一一对应，原样透传。</li>
+<li><b>不携带窗口句柄</b>。注入点在方法 HEAD，
+<b>先于 vanilla 方法头部的窗口句柄守卫</b>执行 —— 所以即使是其它窗口发来的回调，你也能看到事件。</li>
+<li><b>滚轮给的是「选项处理之前」的原始增量</b>：vanilla 会在此基础上应用 <code>discreteMouseScroll</code> 等选项，
+你拿到的是 HEAD 处的原值。</li>
+</ul>
+
+<div class="note">
+<strong>什么时候用输入事件，什么时候用 <code>BrushKeybinds</code>。</strong>
+想要「玩家可以在控制界面改键、绑定持久化、用 <code>isDown()</code> 查询」→ 用 <code>BrushKeybinds</code>；
+想要「原始回调 / 不占用键位 / 感知修饰键与扫描码」→ 用 <code>INPUT_*</code> 事件。
+两者可以同时用。
+</div>
+
+<p class="muted">自检口径：自检运行无人输入，退出点前这三个事件计数为 0 是正常态；探针以伪窗口句柄
+<code>0L</code> + 哨兵键码 live-fire 真实调用一次并断言计数增长。
+出处：<code>KeyPressEvent</code> / <code>MouseButtonEvent</code> / <code>MouseScrollEvent</code> / <code>InputAction</code> javadoc、实测日志。</p>
+
+<h2>5. 创造栏相关：两个面别混</h2>
+
+<p>名字都带「注册」，但它们是<b>两个不同层的东西</b>：</p>
+
+<table>
+<tr><th></th><th><code>CreativeTabOutputEvent</code></th><th><code>ClientRegistrationEvent</code></th></tr>
+<tr><td>它是什么</td><td>一个<b>监听器接口类型</b>，不是 <code>BrushEvents</code> 上的顶层字段</td>
+<td><code>BrushEvents.CLIENT_REGISTRATION</code> 的事件对象</td></tr>
+<tr><td>怎么订阅</td><td><code>BrushCreativeTabs.entriesOf(tabKey | Identifier).register(listener)</code> —— <b>按标签页键</b>订阅</td>
+<td><code>BrushEvents.CLIENT_REGISTRATION.register(listener)</code> —— 全局一次</td></tr>
+<tr><td>L1 来源</td><td><code>CreativeModeTab#buildContents</code> TAIL</td>
+<td><code>BuiltInRegistries#bootStrap()</code> TAIL</td></tr>
+<tr><td>触发时机</td><td>每次该标签页构建时—— 可突发、非热路径</td>
+<td>vanilla 内容注册完成之后、<code>Minecraft</code> 构造之前 —— <b>每进程恰一次</b></td></tr>
+<tr><td>线程</td><td>调用 <code>buildContents</code> 的线程</td>
+<td>执行 bootstrap 的线程</td></tr>
+<tr><td>可取消</td><td>否</td><td>否</td></tr>
+<tr><td>三运行时</td><td>一致</td>
+<td>事件点一致；客户端注册的 <b>flush 落地点</b>在 S3 推迟到首个 <code>PACKS_REGISTERED</code></td></tr>
+<tr><td>典型用途</td><td>把自己的物品塞进某个现有标签页</td>
+<td>最后一批客户端注册</td></tr>
+</table>
+
+<pre><code>import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.item.ItemStack;
+
+import org.abstruck.brush.api.BrushCreativeTabs;
+import org.abstruck.brush.api.BrushEvents;
+
+BrushCreativeTabs.entriesOf(Identifier.fromNamespaceAndPath("minecraft", "ingredients"))
+        .register(entries -&gt; {
+            entries.add(new ItemStack(BuiltInRegistries.ITEM.getValue(
+                    Identifier.fromNamespaceAndPath("mymod", "my_item"))));
+        });
+
+BrushEvents.CLIENT_REGISTRATION.register(event -&gt; {
+    // 此刻：经 BrushRegistry 客户端组提交的注册已被统一 flush 落地
+    // 监听器内仍可做最后一批客户端注册（S1/S2 下 flush 后到场立即执行）
+});
+</code></pre>
+
+<div class="note">
+<strong>为什么创造栏只能「追加」。</strong> vanilla 14 个标签页的 (row,column) 槽位已全部占满，
+而 <code>Bootstrap#bootStrap()</code> 在注册窗口之后会无条件调用 <code>CreativeModeTabs.validate()</code>，
+重复槽位直接中止启动。因此 <code>BrushRegistry</code> 对 <code>CREATIVE_MODE_TAB</code> 注册表<b>直接拒收</b>并给出指引
+Brush 自有的标签页走另一条路：
+<code>BrushCreativeTabs.register(BrushCreativeTab.builder(...).build())</code> 展示在创造栏左侧的 Brush 侧栏，
+<b>进不了任何注册表</b>，也因此不会触发 <code>CreativeTabOutputEvent</code>。
+出处：<code>BrushCreativeTabs</code> / <code>BrushCreativeTab</code> / <code>CreativeTabEntries</code> javadoc、设计文档记载。
+</div>
+
+<h3>5.1 顺带一提：<code>PACKS_REGISTERED</code> 与界面无关</h3>
+
+<p>它属于资源包仓库构建完成，与界面 / 输入无关，放在「数据与资源」页讲。
+这里只提醒一句：<b>它是 S3 下客户端注册 flush 的落地点</b>，所以 S3 的 <code>CLIENT_REGISTRATION</code>
+事件监听器触发时，「最后一批注册」可能仍在缓冲里。</p>
+
+<h2>6. 一页速查</h2>
+
+<table>
+<tr><th>项</th><th>值</th></tr>
+<tr><td>屏幕事件载荷</td><td>vanilla <code>Screen</code> 实例直接透传</td></tr>
+<tr><td>屏幕事件过滤</td><td>监听器职责；对所有屏幕派发</td></tr>
+<tr><td>HUD 事件载荷</td><td><code>GuiGraphicsExtractor</code> + <code>DeltaTracker</code></td></tr>
+<tr><td>HUD 坐标系</td><td>GUI 缩放坐标系；用 <code>guiWidth()</code> / <code>guiHeight()</code>，不是窗口像素</td></tr>
+<tr><td>键位注册窗口</td><td>mod 初始化期；过晚登记抛 <code>IllegalStateException</code></td></tr>
+<tr><td>键位持久化</td><td>交给 vanilla（<code>Options.keyMappings</code> / options.txt）</td></tr>
+<tr><td>输入动作枚举</td><td><code>RELEASE(0)</code> / <code>PRESS(1)</code> / <code>REPEAT(2，仅键盘)</code> / <code>UNKNOWN(-1)</code></td></tr>
+<tr><td>本页全部事件可取消性</td><td><b>全部不可取消</b></td></tr>
+<tr><td>本页全部事件三运行时</td><td>事件点与线程一致；唯一运行时差异 = S3 的客户端注册 flush 落地点</td></tr>
+</table>
+
+<footer>Brush Wiki · 本页依据源码注释与实测证据（Brush 26.10.1 / MC 26.1.2）· 覆盖 ScreenInitEvent / ScreenResizeEvent / HudExtractEvent / KeyPressEvent / MouseButtonEvent / MouseScrollEvent / InputAction / BrushKeybinds</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

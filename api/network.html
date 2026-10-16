@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>网络 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>网络</h1>
+<p class="lead">Brush 的网络门面是 <code>BrushNetwork</code>：注册通道、发载荷、收载荷。载荷契约是朴素的字节数组 —— <code>(Identifier, byte[])</code> 与 <code>(Reply, Identifier, byte[])</code>，mod 侧看不到任何 vanilla 网络类型。三条硬规则：通道必须在<b>主入口点</b>登记、载荷<b>恰好一次且在主线程</b>投递、S3 下通道需要被转登记进 NeoForge。</p>
+
+<h2>一、BrushNetwork 公开方法</h2>
+
+<table>
+<thead><tr><th>签名</th><th>语义</th></tr></thead>
+<tbody>
+<tr><td><code>static void register(Identifier channel)</code></td><td>注册通道。注册是纯映射写入，<b>任意线程</b>可调用 —— 含 mod 入口构造期。</td></tr>
+<tr><td><code>static void register(Identifier channel, int maxSize)</code></td><td>注册通道。<code>throws IllegalArgumentException</code>：通道已注册，或上限越界（<code>1..1048576</code>）。不静默覆盖。</td></tr>
+<tr><td><code>static void send(Identifier channel, byte[] data)</code></td><td>经当前连接发送载荷。需在主线程调用。<code>throws IllegalStateException</code>：通道未注册 / 未连接服务器 / 宿主判定不可发送 / 引擎缺席；<code>throws IllegalArgumentException</code>：载荷超长。</td></tr>
+<tr><td><code>static void install(BrushNetwork.Impl implementation)</code></td><td>装入引擎实现。你不用调它。</td></tr>
+<tr><td><code>static boolean isInstalled()</code></td><td>引擎是否已装入。</td></tr>
+<tr><td><code>interface BrushNetwork.Impl</code></td><td>引擎接口：<code>int defaultMaxSize()</code> / <code>void register(Identifier, int)</code> / <code>void send(Identifier, byte[])</code>。实现住库模组 <code>brush-api</code>（<code>org.abstruck.brush.net.BrushNetworkImpl</code>）。</td></tr>
+</tbody>
+</table>
+
+<p>门面为什么这么薄？包归属：<code>org.abstruck.brush.api</code> 是核心模块拥有的包，宿主加载的代码只在该模块里找它、找不到也不回退。于是引擎整体搬进库模组 <code>brush-api</code>，<code>BrushNetwork</code> 留核心当门面，实现经 <code>install(Impl)</code> 装入；另有<b>惰性解析</b>兜底 ⇒ 不依赖任何 mod 的初始化顺序。</p>
+
+<div class="note"><b>作者侧编译面不变</b>：用 <code>BrushNetwork</code> 只需要核心产物 / 契约 jar。只有直接使用引擎内部件才需要库模组产物。</div>
+
+<h2>二、通道登记时机：必须在主入口点</h2>
+
+<p>这是 S3 的实际教训，不是风格偏好：</p>
+
+<pre><code>public final class ExampleNetworkMod implements BrushModInitializer {
+    public static final Identifier HELLO = Identifier.fromNamespaceAndPath("mdkexample", "hello");
+
+    @Override
+    public void onInitialize() {                 // &lt;- 主入口点：正确位置
+        BrushNetwork.register(HELLO, 4096);
+    }
+}</code></pre>
+
+<p>NeoForge 只给<b>一次</b>载荷登记机会，宿主适配器在那一刻把"当时已知的通道"桥接进 NeoForge 注册表；而<code>entrypoints.client</code> 的入口点比它<b>晚</b>。在客户端入口点登记的通道在 S3 下<b>发不出去</b> —— 该情形由发送守卫<b>响亮失败</b>并给出补救指引（S1/S2 无此限制）。这不是推断：宿主实测现场抛过 <code>UnsupportedOperationException: Payload &lt;id&gt; may not be sent to the server!</code>，把登记挪回主入口点后同一场景通过。</p>
+
+<div class="warn">一句话规则：<b>通道登记放 <code>onInitialize()</code>，不要放 <code>onInitializeClient()</code>。</b>收包监听器（<code>NETWORK_PAYLOAD</code> / <code>SERVER_PAYLOAD</code>）的订阅时机不受此限。</div>
+
+<h2>三、可读的失败</h2>
+
+<p>设计意图是"不静默失效"，所以下面每一条都是<b>带指引的异常</b>，而不是难懂的宿主异常或无声丢弃：</p>
+
+<table>
+<thead><tr><th>情形</th><th>异常与消息要点</th></tr></thead>
+<tbody>
+<tr><td>发送未注册的通道</td><td><code>IllegalStateException: channel not registered: &lt;id&gt; (call BrushNetwork.register first)</code></td></tr>
+<tr><td>载荷超过该通道上限</td><td><code>IllegalArgumentException: payload for &lt;id&gt;: N bytes exceeds channel limit M</code></td></tr>
+<tr><td>未连接服务器</td><td><code>IllegalStateException: not connected to a server (check Minecraft.getConnection() != null before sending)</code> —— mod 应把"未连接"当正常状态，发送前自己检查</td></tr>
+<tr><td>库模组缺席</td><td><code>IllegalStateException: Brush networking is unavailable: the library mod 'brush-api' is not installed in brush-mods/ ... Install brush-api.jar and declare it in your mod's brush.mod.json depends.</code></td></tr>
+<tr><td>重复注册 / 上限越界</td><td><code>IllegalArgumentException</code>：<code>channel already registered: &lt;id&gt;</code> / <code>channel &lt;id&gt;: maxSize N out of range 1..1048576</code></td></tr>
+<tr><td><b>S3 下通道迟到</b></td><td><code>BrushChannels.SendGuard</code> 给出的原因：通道在 NeoForge 载荷注册事件之后才登记，不在 NeoForge 载荷表里、<code>checkPacket</code> 会拒收 ⇒ 给出"从 mod 主入口点登记"的指引</td></tr>
+</tbody>
+</table>
+
+<p><code>SendGuard</code> 是宿主侧安装的接缝：S1/S2 下守卫为 <code>null</code>；S3 下由桥在 attach 时装上。它让"事件之后登记的通道"变成 <b>Brush 自己的可读硬失败</b>，而不是让 NeoForge 抛难懂的异常，也不是静默失效。</p>
+
+<h2>四、载荷事件契约</h2>
+
+<table>
+<thead><tr><th>事件</th><th>载荷契约</th><th>方向与线程</th></tr></thead>
+<tbody>
+<tr><td><code>BrushEvents.NETWORK_PAYLOAD</code></td><td><code>void onNetworkPayload(Identifier channel, byte[] data)</code></td><td><b>客户端收</b>。触发线程 = 处理该包的线程；Brush 已统一到<b>主线程</b>投递。</td></tr>
+<tr><td><code>BrushEvents.SERVER_PAYLOAD</code></td><td><code>void onServerPayload(Reply reply, Identifier channel, byte[] data)</code></td><td><b>服务端收</b>。触发线程 = 服务端网络线程。<code>reply</code> 是<b>回包句柄</b>，可多次调用。</td></tr>
+<tr><td><code>ServerPayloadEvent.Reply</code></td><td><code>void send(Identifier channel, byte[] data)</code></td><td>向发来该载荷的客户端回包。<code>throws IllegalArgumentException</code>：载荷超过该通道上限。</td></tr>
+</tbody>
+</table>
+
+<p>为什么需要 <code>SERVER_PAYLOAD</code>：只有 <code>send</code> + <code>NETWORK_PAYLOAD</code> 时，网络是<b>单向</b>的 —— 任何"服务器驱动的同步 / 查询"都写不出来，因为回包得构造 vanilla 的 <code>ClientboundCustomPayloadPacket</code> 与核心内部件。而 <code>Reply</code> 的实现由<b>库模组</b>提供，对 mod 只暴露这一个接口 —— 于是"双向"对 mod 而言仍然只有 L2，<b>依赖面里不出现任何 vanilla 网络类型</b>。</p>
+
+<dl class="kv">
+<dt><code>data</code> 的所有权</dt><dd>解码时新建的数组，监听器<b>可以安全持有</b>；长度已按通道上限校验。</dd>
+<dt>未注册 id</dt><dd>到不了这两个事件：编码 / 解码链保证未注册 id 走 vanilla 语义，vanilla / 宿主载荷<b>零开销</b>。</dd>
+<dt>回包路径</dt><dd><code>Reply</code> 内部是"取该通道上限 → 过宿主守卫 → 尺寸 / 注册校验 → 沿服务端连接发 <code>ClientboundCustomPayloadPacket</code>"。</dd>
+</dl>
+
+<div class="warn"><b>端到端限制</b>：<code>NETWORK_PAYLOAD</code> 覆盖"服务器 → 客户端"的投递。与世界内服务器的完整往返需要服务端存在同名通道对端；<b>专有服务器不在本项目范围</b>。单机世界的集成服务器为 vanilla 代码，未知通道按 vanilla 语义丢弃 —— 这是 vanilla 自定义载荷机制的设计行为，不是故障。非 mod 服务器<b>未实测</b>。<span class="badge">未验证</span></div>
+
+<h2>五、投递语义：恰好一次 + 主线程</h2>
+
+<p>这不是"顺手做的"，而是实机探针逼出来的两条修正：</p>
+
+<ol>
+<li><b>vanilla 本地连接会把同一个包处理两次。</b>26.1.2 下集成服务器连接存在"内联 + 排队"双处理 —— 一次在 netty 线程内联（<code>Connection.channelRead0</code>），一次在主线程排队（<code>PacketProcessor.processQueuedPackets</code> ← <code>Minecraft.runTick</code>），两次的 <code>System.identityHashCode(packet)</code> <b>完全相同</b>。</li>
+<li><b>因此我们的注入做两件事，都是必需的</b>：按包实例身份去重，以及统一在主线程投递—— 否则 mod 监听器可能在网络线程上跑、直接触碰游戏状态。</li>
+</ol>
+
+<p>去重落在 <code>DispatchDedupe</code>：<b>有界身份窗口</b>，默认保留最近 <code>64</code> 个包对象身份。为什么不是"只记最后一个"：单槽在两个包交错时会漏 —— X 内联认领、Y 内联把 X 顶掉、主线程再处理 X 时槽里是 Y ⇒ X 被派发两次。这个语义由 <code>DispatchDedupeTest</code>（9 例）钉住。代价如实登记：强引用最近 64 个包对象，<b>有界</b>，不随运行时长增长。</p>
+
+<p>这条保证已经变成<b>自动化硬断言</b>：</p>
+
+<pre><code>network: sent=1, observed=100 ticks, alive=yes, kicked=no,
+  realTransport=false (isMemoryConnection=true),
+  roundTrip: server.pings=1, client.pongs=1 (expected 1/1), mainThread=yes -- result=ok</code></pre>
+
+<dl class="kv">
+<dt>断言 1</dt><dd><code>server.pings == 1</code> —— 服务端钩子生效。</dd>
+<dt>断言 2</dt><dd><code>client.pongs == 1</code> —— <b>恰好一次</b>，失败消息里点名 <code>DispatchDedupe</code>。</dd>
+<dt>断言 3</dt><dd>收到 pong 时 <code>Minecraft.isSameThread()</code> —— <b>投递在主线程</b>。</dd>
+<dt>实测覆盖</dt><dd>S1、S2 与 S3 三个运行时都有 <code>server.pings=1, client.pongs=1, mainThread=yes</code> 的实机证据。</dd>
+<dt>负向测试</dt><dd>临时短路去重后复跑，断言如期把构建打红并报 <code>client.pongs=2</code> —— "一个不会失败的断言等于没有断言"。</dd>
+</dl>
+
+<h2>六、三运行时的差异</h2>
+
+<table>
+<thead><tr><th>运行时</th><th>通道登记</th><th>发送与投递</th></tr></thead>
+<tbody>
+<tr><td><b>S1</b> 纯 Brush</td><td>登记进 Brush 通道注册表即可</td><td>直接可用：编解码经 vanilla 单点 <code>CustomPacketPayload$1#findCodec</code> 的 RETURN 包装接通</td></tr>
+<tr><td><b>S2</b> Fabric 宿主</td><td>同上</td><td>同上。fabric-api 包装的是 findCodec 的<b>调用点</b>，与我们包装的<b>方法体 RETURN</b> 位置不同，任意先后互不抹除；NeoForge 侧 <code>NetworkRegistry.getCodec</code> 在其 miss 分支内，未注册 id 仍会走到我们的包装</td></tr>
+<tr><td><b>S3</b> NeoForge 宿主</td><td>同上</td><td>需先把通道<b>转登记</b>进 NeoForge 载荷表，否则 <code>checkPacket</code> 拒绝发送</td></tr>
+</tbody>
+</table>
+
+<p>转登记由库模组里的 <code>org.abstruck.brush.api.impl.host.NeoForgePayloadBridge</code> 完成：</p>
+
+<ul>
+<li>它挂在宿主的 <b>mod 事件总线</b>的 <code>RegisterPayloadHandlersEvent</code> 上，用 <code>PayloadRegistrar.playBidirectional(type, codec, NOOP, NOOP)</code> 把当时已知的每个 Brush 通道登记为双向载荷（每 id 一条日志：<code>S3 payload bridge: registered channel &lt;id&gt; (maxSize=...)</code>）。</li>
+<li><b>handler 是空实现，这是刻意的</b>：登记的唯一目的是让 NeoForge 的 <code>checkPacket</code> 放行；<b>投递仍走我们自己的注入点</b>，与 S1/S2 完全同一条链。若这里再转发一次就会双重投递 —— 实测 <code>server.pings=1, client.pongs=1</code> 把"既无双重投递、也未被宿主截走"钉死。</li>
+<li><b>幂等</b>：<code>attach</code> 只挂一次监听；每个 id 只登记一次。</li>
+<li><b>加载器只把它当 <code>Object</code> 递出</b>：核心经中性接缝把宿主 mod 事件总线当对象交给库模组入口，由库模组自行 <code>attach</code>。于是核心<b>零 mod 类型引用</b>，"引用 NeoForge 类型"这件事落在允许引用宿主类的库模组里；<code>S1/S2</code> 下该类永不加载。</li>
+</ul>
+
+<div class="note"><b>如实登记的边界</b>：① 事件之后才登记的通道不会被桥接；② 事件精确触发点位于 FML loader jar 内，本项目<b>未做字节码直证</b> —— 但若推断有误，事件到来时通道表为空、什么都注册不上，S3 探针会照旧崩，<b>不会假绿</b>；③ 只覆盖"两侧都跑 NeoForge + 我们的宿主适配器"的实测情形。<span class="badge">未验证</span></div>
+
+<h2>七、一段完整的示例：注册通道 + 发一条 + 收一条</h2>
+
+<p>主入口负责<b>登记通道与订阅收包</b>：</p>
+
+<pre><code>package com.example.mdk;
+
+import java.nio.charset.StandardCharsets;
+
+import net.minecraft.resources.Identifier;
+
+import org.abstruck.brush.api.BrushEvents;
+import org.abstruck.brush.api.BrushModInitializer;
+import org.abstruck.brush.api.BrushNetwork;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+public final class ExampleNetworkMod implements BrushModInitializer {
+
+    private static final Logger LOGGER = LogManager.getLogger("mdkexample");
+
+    /** 通道 id 的命名空间用你的 mod id —— 命名冲突由你自己负责。 */
+    public static final Identifier HELLO = Identifier.fromNamespaceAndPath("mdkexample", "hello");
+
+    @Override
+    public void onInitialize() {
+        // ① 登记通道 —— 必须在主入口点
+        BrushNetwork.register(HELLO, 4096);   // 4 KiB 上限；不传上限则用默认 1 MiB
+
+        // ② 客户端收包（服务器 -&gt; 客户端）
+        BrushEvents.NETWORK_PAYLOAD.register((channel, data) -&gt; {
+            if (!HELLO.equals(channel)) {
+                return;
+            }
+            LOGGER.info("[mdkexample] payload received: "
+                    + new String(data, StandardCharsets.UTF_8));
+        });
+
+        // ③ 服务端收包 + 回包（客户端 -&gt; 服务器 -&gt; 客户端）
+        BrushEvents.SERVER_PAYLOAD.register((reply, channel, data) -&gt; {
+            if (!HELLO.equals(channel)) {
+                return;
+            }
+            LOGGER.info("[mdkexample] server side got: "
+                    + new String(data, StandardCharsets.UTF_8));
+            reply.send(HELLO, "pong".getBytes(StandardCharsets.UTF_8));
+        });
+    }
+}</code></pre>
+
+<p>客户端入口只负责<b>发</b>，并且把"未连接"当正常状态处理：</p>
+
+<pre><code>package com.example.mdk;
+
+import java.nio.charset.StandardCharsets;
+
+import net.minecraft.client.Minecraft;
+
+import org.abstruck.brush.api.BrushClientModInitializer;
+import org.abstruck.brush.api.BrushEvents;
+import org.abstruck.brush.api.BrushNetwork;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+public final class ExampleNetworkClient implements BrushClientModInitializer {
+
+    private static final Logger LOGGER = LogManager.getLogger("mdkexample");
+
+    /** 只发一次（进入世界、连接就绪后的首个 tick）。 */
+    private static boolean sent;
+
+    @Override
+    public void onInitializeClient() {
+        BrushEvents.CLIENT_TICK.register(event -&gt; {
+            if (sent) {
+                return;
+            }
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft == null || minecraft.getConnection() == null) {
+                return;   // 未连接 = 正常状态，等下一 tick
+            }
+            sent = true;
+            try {
+                BrushNetwork.send(ExampleNetworkMod.HELLO,
+                        "ping".getBytes(StandardCharsets.UTF_8));
+                LOGGER.info("[mdkexample] ping sent on " + ExampleNetworkMod.HELLO);
+            } catch (RuntimeException e) {
+                LOGGER.warn("[mdkexample] ping send failed: " + e);
+            }
+        });
+    }
+}</code></pre>
+
+<p>执行顺序：<code>onInitialize()</code> 登记通道并订阅监听器 → S3 下宿主载荷事件到来时桥接已知通道 → 进入世界后 <code>CLIENT_TICK</code> 里发一次 → 服务端侧 <code>SERVER_PAYLOAD</code> 回包 → 客户端侧 <code>NETWORK_PAYLOAD</code> 收到，两者都已在主线程上被调用。</p>
+
+<p>延伸阅读：<a href="content.html">内容注册</a>、<a href="first-mod.html">第一个 mod（MDK 上手）</a>、<a href="../brush/runtimes.html">三运行时与宿主适配</a>、<a href="../brush/dispatch.html">派发层与事件</a>。</p>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

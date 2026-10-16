@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>构建、产物与命令 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>构建、产物与命令</h1>
+<p class="lead">交付里是<b>两个各自独立、都能单独 <code>build</code> 的项目</b>：<code>Brush/</code>与 <code>Brush API/</code>。加载器不依赖库模组即可编译出包；两者只在"作者编译契约 jar"这一处相交。本页给出产物清单、全部可用任务、属性覆盖、自举的真实规模与常见失败的归因。</p>
+
+<h2>两个项目与两阶段构建</h2>
+<table>
+<tr><th>目录</th><th>是什么</th><th>关键源集</th></tr>
+<tr><td><code>Brush/</code></td><td>加载器本体</td><td>加载器核心源集 + 4 个宿主 harness/profile 类 + <code>bootstrap</code> 源集</td></tr>
+<tr><td><code>Brush API/</code></td><td>能力库 mod</td><td>标准 Gradle 布局的单一 <code>src</code> 源集</td></tr>
+</table>
+<p><b>构建即自举</b>：<code>gradlew build</code> / <code>jar</code> / <code>compileJava</code> 会自动跑一次 <code>metadata</code>，把编译所需的 <b>MC 客户端 jar</b> 下下来—— <b>不再需要先手动跑 <code>bootstrap</code></b>。接线点：加载器项目的 <code>verifyVanillaJar</code>、库模组项目的 <code>verifyInputs</code>、MDK 示例项目的 <code>verifyInputs</code> 都默认 <code>dependsOn 'metadata'</code>。运行前本来就自动补齐<b>库 + natives + assets</b>。<code>bootstrap</code> 因此变成<b>可选的"一次性备齐"</b>命令。<b>离线 / CI 逃生阀</b>：传 <code>-Pbrush.autoBootstrap=false</code> 关掉自动自举 —— 那时缺件仍然<b>可读失败</b>，不会静默跳过。</p>
+<pre><code>:: ① 直接构建（构建期自动确保 MC 客户端 jar；首次需要联网）
+cd "Brush"
+gradlew.bat jar
+
+:: ② 库模组：同样直接构建 —— 加载器核心默认从 JitPack 取（主 jar + classifier tools）
+::    它的 verifyInputs 会自动带 installNeoForge，MC 侧与宿主产物走共享的用户级缓存
+cd "..\Brush API"
+gradlew.bat jar
+
+:: ③ 回加载器再 build：契约 jar 自动发现 ② 的产物，无需传属性
+cd "..\Brush"
+gradlew.bat build
+
+:: 可选：一次性备齐（客户端 jar + 库 + natives + assets），避免首次运行时等
+gradlew.bat bootstrap            :: S1/S2 够用；要跑 S3 再补 installNeoForge
+gradlew.bat installNeoForge
+
+:: 可选：换落点（项目内、共享盘…）／关掉自动自举（离线、CI）
+:: gradlew.bat jar -Pbrush.cache=&lt;缓存目录&gt; -Pbrush.vanillaJar=&lt;26.1.2.jar 路径&gt;
+:: gradlew.bat jar -Pbrush.autoBootstrap=false</code></pre>
+<p><code>Brush API</code> 项目的<b>加载器核心默认从 JitPack 取</b>，因此<b>把整个文件夹拷到别的设备也能跑 S1 / S2 / S3</b>：主 jar <code>com.github.Abstruck-Studio:Brush:&lt;版本&gt;</code>与宿主 harness <code>com.github.Abstruck-Studio:Brush:&lt;版本&gt;:tools</code>；仓库里加了 JitPack 源，且依赖解析是<b>惰性</b>的。<b>离线 / 自包含回退</b>：传 <code>-Pbrush.useLocalJars=true</code> 就改用随项目分发的 <code>libs/Brush-&lt;版本&gt;.jar</code> 与 <code>libs/brush-tools.jar</code>。它的 <code>metadata</code> / <code>libraries</code> / <code>assets</code> / <code>bootstrap</code> 用加载器 jar 里的主类（<code>launch.meta</code> / <code>launch.deps</code> / <code>launch.assets</code>）自己下载 MC；三个运行任务与 <code>installNeoForge</code> 都是自包含的 <code>JavaExec</code>，<b>不委托任何兄弟项目</b>。</p>
+<p class="note"><b>JitPack 提供不了的那部分照旧本地自举</b>：MC 侧仍走用户级 Gradle 缓存、仍需本项目自己下；<b>NeoForge universal jar 也仍需本地安装产物</b>（<code>installNeoForge</code>）。JitPack 只解决"加载器核心与宿主 harness 从哪里来"。</p>
+<p><b>MC 侧默认落在用户级 Gradle 缓存里</b>：vanilla jar 的默认 = <code>&lt;gradle 用户目录&gt;/caches/brush/&lt;mcVersion&gt;/&lt;mcVersion&gt;.jar</code>、MC 缓存的默认 = <code>&lt;gradle 用户目录&gt;/caches/brush/cache/</code>。因此<b>项目根不再出现 <code>26.1.2/</code> 与 <code>cache/</code> 这两个大目录</b>，而加载器项目、库模组项目、MDK 示例项目<b>默认共享同一份</b>下载；<b><code>run/</code> 仍留在各自项目根</b>。想换落点照旧传 <code>-Pbrush.vanillaJar=</code> / <code>-Pbrush.cache=</code> 覆盖。本机实测。</p>
+<p><b>清空项目内旧目录后的实测</b>：开发仓 <code>metadata libraries assets</code> = 20s、导出加载器 <code>libraries assets jar</code> = 9s、库模组项目 <code>jar</code> = 8s、MDK 示例项目 <code>tasks</code> = 7s —— 均 <code>BUILD SUCCESSFUL</code>。</p>
+<p><b>开发套件（MDK）已扁平化、且默认从网络库取依赖</b>：解压后<b>项目根就是可运行的 Gradle 工程</b>—— <b>没有 <code>example-mod/</code> 这层子目录，也不再自带 <code>libs/</code></b>。加载器与能力库默认走 JitPack 坐标：<code>com.github.Abstruck-Studio:Brush:26.10.1</code>、<code>com.github.Abstruck-Studio:Brush-API:1.0.0</code>、以及<b>同一加载器坐标的 <code>tools</code> classifier</b>；仓库里加了 JitPack 源，解析是<b>惰性</b>的。<b>离线 / 自包含</b>传 <code>-Pbrush.useLocalJars=true</code>，改用<b>你自己放进 <code>libs/</code> 的三份 jar</b>，缺件由新增任务 <code>verifyLocalJars</code> 给<b>可读失败</b>；版本可用 <code>-PbrushVersion=</code> / <code>-PbrushApiVersion=</code> 换。任务集 = <code>bootstrap</code> / <code>metadata</code> / <code>libraries</code> / <code>assets</code> / <code>jar</code> / <code>stage</code> / <code>runClient</code>（S1）/ <code>runFabricClient</code>（S2）/ <code>installNeoForge</code> / <code>runNeoForgeClient</code>（S3）/ <code>verifyLocalJars</code> —— 它用加载器 jar 里的 <code>launch.meta</code> / <code>launch.deps</code> / <code>launch.assets</code> 主类<b>直接自举 MC</b>，用 harness <b>直接拉起宿主</b>，全程不依赖加载器源码。实测：网络模式 <code>gradlew clean jar</code> = <code>BUILD SUCCESSFUL</code>，离线缺件 = 可读失败。上手步骤与接线模板见<a href="../api/first-mod.html">第一个 mod</a>。</p>
+
+<h2>产物清单</h2>
+<table>
+<tr><th>产物</th><th>路径</th><th>用途</th><th>量级</th></tr>
+<tr><td>加载器 jar</td><td><code>build/libs/Brush-&lt;version&gt;.jar</code></td><td>S1 直接跑；S2/S3 作为 mod 装进宿主。<code>gradlew build</code> <b>必产出</b>。<b>同时是 JitPack 坐标 <code>com.github.Abstruck-Studio:Brush:&lt;版本&gt;</code> 提供的那份制品</b></td><td><b>实测 393,117 B（约 384 KiB）、272 条目</b></td></tr>
+<tr><td>库模组 jar</td><td><code>build/libs/brush-api.jar</code></td><td>能力库 mod，放进实例的 <code>brush-mods/</code></td><td><b>实测 25,468 B（约 25 KiB）、30 条目</b></td></tr>
+<tr><td>作者编译契约 jar</td><td><code>build/libs/brush-api-contract.jar</code></td><td>给 mod 作者一个<b>小而稳定</b>的编译期依赖面</td><td><b>未实测</b>：本机加载器项目的 <code>build/libs/</code> 下只有本体 jar，说明尚未跑过会产出它的 <code>build</code> / <code>assemble</code> / <code>apiContractJar</code></td></tr>
+<tr><td>宿主 harness 工具 jar</td><td><code>build/libs/brush-tools.jar</code></td><td>把加载器项目里那份独立的宿主装配件单独发出来，好让 jar 版 MDK 与库模组项目能跑 S2 / S3；它只依赖本体 jar 的 <code>launch/**</code> 与 gson/log4j，<b>不含任何第三方二进制、不引用 MC 类型</b></td><td><b>实测 27,615 B（约 27 KiB）</b>；随 <code>gradlew build</code> / <code>assemble</code> 一并产出</td></tr>
+<tr><td>发布物</td><td><code>build/repo/**</code></td><td><code>gradlew publish</code> 的默认落点：坐标 <code>org.abstruck.brush:brush:&lt;loaderVersion&gt;</code>，含本体 jar、工具 jar（classifier <code>tools</code>）、<code>.pom</code>、<code>.module</code> 与全套校验和；<b>默认只发到本地目录，不碰远程、不需要凭据</b></td><td>实测产物清单：<code>brush-26.10.1.jar</code>（394,153 B）/ <code>brush-26.10.1-tools.jar</code>（27,615 B）/ <code>.pom</code> / <code>.module</code> / <code>maven-metadata.xml</code></td></tr>
+<tr><td>MC 侧自举产物</td><td><b>用户级 Gradle 缓存</b>：<code>&lt;gradle 用户目录&gt;/caches/brush/&lt;mcVersion&gt;/&lt;mcVersion&gt;.jar</code> 与 <code>&lt;gradle 用户目录&gt;/caches/brush/cache/**</code></td><td>vanilla jar、libraries / natives / assets、宿主安装产物（<code>cache/neoforge/install/**</code>）、Fabric 构件；<b>三个项目默认共享这一份</b></td><td>加载器项目下载量见下文"自举的真实规模"；共享落点本机实测合计 <b>1.69 GB</b>（<code>26.1.2/</code> 113 MB + <code>cache/</code> 1581 MB）</td></tr>
+</table>
+<p class="muted"><b>版本单一来源</b>：<code>gradle.properties</code> 的 <code>mcVersion=26.1.2</code> 与 <code>loaderVersion=26.10.1</code>。<code>build.gradle</code> 读它们，并在 <code>processResources</code> 时展开 <code>brush.mod.json</code> / <code>fabric.mod.json</code> / <code>META-INF/neoforge.mods.toml</code> / <code>brush-build.properties</code> 里的 <code>${version}</code> 等占位符。</p>
+<p class="muted"><b>构建 JDK 不写死路径</b>：四个 <code>gradle.properties</code> 里已<b>删除</b>写死的 <code>org.gradle.java.home=&lt;本机 JDK 路径&gt;</code>，改为 <code>org.gradle.java.installations.fromEnv=JDK25_HOME</code> —— <b>只写环境变量名、不含任何绝对路径</b>；四个 <code>settings.gradle</code> 挂了 <code>pluginManagement</code>与 <code>org.gradle.toolchains.foojay-resolver-convention</code> <code>0.7.0</code>，而 <code>build.gradle</code> 原有的 <code>java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }</code> 保持不变 ⇒ <b>本机没有 JDK 25 时 Gradle 会自动把它下到 Gradle 缓存</b>。JDK 装在 Gradle 不自动扫描的位置时：<code>setx JDK25_HOME &lt;JDK 25 目录&gt;</code>；临时指定用 <code>gradlew.bat build -Dorg.gradle.java.home=&lt;JDK 25 路径&gt;</code>。</p>
+
+<h2>全部可用任务</h2>
+<h3><code>Brush/</code>（加载器本体）</h3>
+<table>
+<tr><th>任务</th><th>一句话</th><th>需要网络？</th><th>幂等？</th></tr>
+<tr><td><code>build</code></td><td>Java 插件的聚合任务：<code>assemble</code> + <code>check</code>；<b>只构建加载器时也能通过</b>。构建期自动跑 <code>metadata</code> 补齐 MC 客户端 jar</td><td><b>首次是</b>；已缓存则否</td><td>是</td></tr>
+<tr><td><code>jar</code></td><td>打包本体 → <code>build/libs/Brush-&lt;version&gt;.jar</code></td><td><b>首次是</b></td><td>是</td></tr>
+<tr><td><code>assemble</code></td><td>装配全部产物；本项目挂了 <code>apiContractJar</code> 与 <code>toolsJar</code></td><td>否</td><td>是</td></tr>
+<tr><td><code>toolsJar</code></td><td>把加载器项目的宿主 harness打成 <code>build/libs/brush-tools.jar</code> —— 供 jar 版 MDK 与库模组项目跑 S2 / S3；依赖 <code>toolsClasses</code>，只含自有类</td><td>否</td><td>是</td></tr>
+<tr><td><code>publish</code></td><td>把 <code>brush</code> 发布物写进<b>默认的本地目录仓库</b> <code>build/repo/**</code>；<b>默认不碰远程、不需要凭据</b>。要发远程必须显式传 <code>-Pbrush.publishUrl=</code></td><td>否；<b>传了 <code>-Pbrush.publishUrl=</code> 才需要</b></td><td>是</td></tr>
+<tr><td><code>publishToMavenLocal</code></td><td>装进本机 <code>~/.m2</code> 仓库，供本地联调</td><td>否</td><td>是</td></tr>
+<tr><td><code>apiContractJar</code></td><td>打包作者编译契约；含"产物里只能有 api 包"的机械校验</td><td>否</td><td>是</td></tr>
+<tr><td><code>check</code></td><td>验证任务聚合；本项目挂了 <code>compileToolsJava</code></td><td>否</td><td>是</td></tr>
+<tr><td><code>verifyVanillaJar</code></td><td>vanilla jar 缺失时给<b>可读失败</b>；<b>默认挂 <code>dependsOn 'metadata'</code></b>，所以正常构建时它是"自动补齐"而非"报错"</td><td>否</td><td>是</td></tr>
+<tr><td><code>generateBrushResourceIndex</code></td><td>扫描加载器自身的 <code>assets/</code> 与 <code>data/</code> 资源目录，生成 <code>brush-resources.index</code></td><td>否</td><td>是</td></tr>
+<tr><td><code>bootstrap</code></td><td><b>可选的一次性备齐</b>：客户端 jar + 全部库 + natives + assets —— 含 assets，所以能省掉首次运行时的等待</td><td><b>是</b></td><td>是</td></tr>
+<tr><td><code>metadata</code></td><td>取版本元数据（manifest → version json）；缺客户端 jar 时下载，已在则交叉核验 sha1 + size。<b></b>—— <code>build</code> / <code>jar</code> / <code>compileJava</code> 默认依赖它</td><td><b>是</b></td><td>是</td></tr>
+<tr><td><code>libraries</code></td><td>下载全部 applicable 库并把 natives 解压到 <code>cache/natives</code></td><td><b>是</b></td><td>是</td></tr>
+<tr><td><code>assets</code></td><td>下载资产索引与全部对象到 <code>cache/assets</code></td><td><b>是</b></td><td>是</td></tr>
+<tr><td><code>installNeoForge</code></td><td>用官方安装器装宿主产物到 <code>cache/neoforge/install/**</code>，装完即退出、不启动游戏</td><td><b>是</b></td><td>是</td></tr>
+<tr><td><code>runClient</code></td><td>S1：通过 Brush 自己的 ClassLoader 启动本地 MC 客户端。依赖 <code>libraries</code> + <code>assets</code>，启动前清空 <code>run/brush-mods/*.jar</code>，并按可选的 <code>-Pbrush.runMods=</code> 摆入本次要用的 mod</td><td>首次是，之后否；运行时本身要网</td><td>否</td></tr>
+<tr><td><code>runFabricClient</code></td><td>S2：Fabric 宿主（Knot + Fabric Loader），Brush 作为宿主 mod 装进 <code>run/fabric/mods/</code>；同样先清空 <code>run/fabric/brush-mods/</code>，再按 <code>-Pbrush.runMods=</code> 摆入</td><td>首次是</td><td>否</td></tr>
+<tr><td><code>runNeoForgeClient</code></td><td>S3：NeoForge 宿主（FML），产物用 <code>installNeoForge</code> 备好；先清空 <code>run/neoforge/brush-mods/</code>，再按 <code>-Pbrush.runMods=</code> 摆入</td><td>首次是；宿主产物缺件则要网</td><td>否</td></tr>
+</table>
+<h3><code>Brush API/</code>（库模组）</h3>
+<table>
+<tr><th>任务</th><th>一句话</th><th>需要网络？</th><th>幂等？</th></tr>
+<tr><td><code>build</code> / <code>assemble</code> / <code>check</code></td><td>Java 插件的标准聚合任务。构建期自动跑 <code>metadata</code> 与 <code>installNeoForge</code> 补齐编译所需件</td><td><b>首次是</b></td><td>是</td></tr>
+<tr><td><code>jar</code></td><td>产出 <code>build/libs/brush-api.jar</code></td><td><b>首次是</b></td><td>是</td></tr>
+<tr><td><code>verifyInputs</code></td><td>三类输入缺件都<b>可读失败</b>并给全出路：加载器核心 jar、vanilla jar，以及 <b>NeoForge universal jar</b>。<b>默认挂 <code>dependsOn 'metadata'</code> 与 <code>dependsOn 'installNeoForge'</code></b>，所以正常构建时它触发的是"自动补齐"而非报错</td><td>否</td><td>是</td></tr>
+<tr><td><code>metadata</code> / <code>libraries</code> / <code>assets</code></td><td><b>自包含</b>：用加载器 jar 里的主类（<code>launch.meta</code> / <code>launch.deps</code> / <code>launch.assets</code>）自己下载客户端 jar / 库 / natives / assets，落地到<b>用户级 Gradle 缓存</b>—— 不依赖兄弟项目。<b>其中 <code>metadata</code> 是构建期自动触发的那个</b></td><td><b>是</b></td><td>是</td></tr>
+<tr><td><code>bootstrap</code></td><td><b>可选的一次性备齐</b>：<b>自包含，且包含 <code>installNeoForge</code></b>—— 含 assets，所以能省掉首次运行时的等待</td><td><b>是</b></td><td>是</td></tr>
+<tr><td><code>installNeoForge</code></td><td><b>自包含</b>（<code>JavaExec</code>）：main = <code>org.abstruck.brush.tools.NeoForgeHostHarness</code>，classpath = 加载器 harness+ 本体 jar + gson/log4j，工作目录 = 本项目 <code>run/</code>，实例目录 <code>run/neoforge</code>；<b>S3 首次要先跑它</b>。<b>会自动找本地安装器</b>，找到就不去连 maven，并打印 <code>local installer -&gt; &lt;路径&gt;</code></td><td><b>是</b></td><td>是</td></tr>
+<tr><td><code>runClient</code>（S1）</td><td><b>自包含</b>：<code>JavaExec</code> 直接以 <code>org.abstruck.brush.launch.Brush</code> 启动，工作目录 = 本项目 <code>run/</code>，启动前把 <code>brush-api.jar</code>摆进 <code>run/brush-mods/</code>；依赖 <code>bootstrap</code> + <code>jar</code></td><td><b>是</b></td><td>否</td></tr>
+<tr><td><code>runFabricClient</code>（S2）/ <code>runNeoForgeClient</code>（S3）</td><td><b>自包含</b>（<code>JavaExec</code>）：main = <code>org.abstruck.brush.tools.FabricHostHarness</code> / <code>NeoForgeHostHarness</code>，classpath = 加载器 harness+ 本体 jar + gson/log4j，工作目录 = 本项目 <code>run/</code>，实例目录 <code>run/fabric</code> / <code>run/neoforge</code>；启动前把 <code>brush-api.jar</code>摆进该实例的 <code>brush-mods/</code>；均依赖 <code>bootstrap</code> + <code>jar</code></td><td><b>是</b></td><td>否</td></tr>
+<tr><td><code>publish</code></td><td>把 <code>brush-api</code> 发布物写进<b>默认的本地目录仓库</b> <code>build/repo/**</code>；<b>默认不碰远程、不需要凭据</b>；发远程必须显式传 <code>-Pbrush.publishUrl=</code></td><td>否；<b>传了 <code>-Pbrush.publishUrl=</code> 才需要</b></td><td>是</td></tr>
+<tr><td><code>publishToMavenLocal</code></td><td>装进本机 <code>~/.m2</code> 仓库，供本地联调</td><td>否</td><td>是</td></tr>
+</table>
+<p class="note">"整个文件夹拷到别的设备"之后<b>直接构建即可</b>：<code>gradlew.bat jar</code> 会在构建期自动把 MC 客户端 jar 下下来；<code>runClient</code> 之前也会自动补齐库与资产。<b>只有想"一次性备齐、避免首次运行时等"时才需要显式 <code>gradlew.bat bootstrap</code></b>。传 <code>-Pbrush.autoBootstrap=false</code> 可关掉自动自举 —— 那时缺件仍以<b>可读失败</b>拦下。<b>三个运行时都不需要兄弟项目</b>。</p>
+<p class="note">两处"为什么用独立任务而不是 <code>doFirst</code>"的原因相同：挂在 <code>compileJava</code> 上的 <code>doFirst</code> 会在任务 up-to-date 时被跳过，校验就静默失效了。</p>
+
+<h2>属性覆盖表</h2>
+<table>
+<tr><th>属性</th><th>含义</th><th>默认值 / 自动发现顺序</th></tr>
+<tr><td><code>-Pbrush.vanillaJar=</code></td><td>vanilla 26.1.2 客户端 jar</td><td>默认= <code>&lt;gradle 用户目录&gt;/caches/brush/&lt;mcVersion&gt;/&lt;mcVersion&gt;.jar</code> —— <b>用户级 Gradle 缓存，三个项目共享同一份</b>；传本属性可指到任意位置</td></tr>
+<tr><td><code>-Pbrush.cache=</code></td><td>MC 缓存目录</td><td>默认 = <code>&lt;gradle 用户目录&gt;/caches/brush/cache/</code> —— 同上，<b>用户级缓存、跨项目共享</b>；传本属性可覆盖</td></tr>
+<tr><td><code>-PbrushCoreJar=</code></td><td><b>库模组项目用</b>：加载器 jar—— <b>默认模式不用它</b>，那时核心来自 JitPack 坐标</td><td>① 本属性；② 库模组项目下的 <code>libs/Brush-*.jar</code>；③ 加载器项目的 <code>build/libs/Brush-*.jar</code>。只在 <code>-Pbrush.useLocalJars=true</code> 时参与解析</td></tr>
+<tr><td><code>-Pbrush.useLocalJars=</code></td><td><b>库模组项目用</b>：加载器核心的<b>来源开关</b>。传 <code>true</code> ⇒ 改用项目自带的 <code>libs/Brush-&lt;版本&gt;.jar</code> 与 <code>libs/brush-tools.jar</code>；不传 ⇒ 默认从 <b>JitPack</b> 取坐标</td><td>默认= 走 JitPack；两份 <code>libs/</code> jar <b>仍然保留在项目里</b>，随时可回退</td></tr>
+<tr><td><code>-Pbrush.jitpackVersion=</code></td><td><b>库模组项目用</b>：JitPack 上加载器的版本（<code>tag|branch|commit</code>）—— 同时用于主 jar 与 classifier <code>tools</code> 的 harness</td><td>默认 <code>test1</code></td></tr>
+<tr><td><code>-PbrushApiJar=</code></td><td><b>加载器项目用</b>：库模组 jar，仅契约 jar 需要</td><td>① 本属性；② 加载器项目下的 <code>libs/brush-api.jar</code>；③ 库模组项目的 <code>build/libs/brush-api.jar</code></td></tr>
+<tr><td><code>-Pbrush.neoforgeInstaller=</code></td><td>本机 NeoForge 安装器 jar</td><td><b>安装器自动发现顺序</b>：① 本属性；② 缓存目录下的 <code>neoforge/neoforge-*-installer.jar</code> —— 这里的「缓存目录」=<code>-Pbrush.cache=</code> 的值，不传就是<b>共享落点</b> <code>&lt;gradle 用户目录&gt;/caches/brush/cache/</code>；都没有才从 <code>maven.neoforged.net</code> 下载</td></tr>
+<tr><td><code>-Pbrush.runMods=</code></td><td><b>只对三个 <code>run*Client</code> 生效</b>：本次运行要装进实例的 mod —— 值是 <b>jar 文件或目录</b>，多项之间用<b>平台路径分隔符</b></td><td><b>无</b></td></tr>
+<tr><td><code>-Pbrush.publishUrl=</code></td><td><b>仅发布用</b>：远程 Maven 仓库地址；<b>不传就不发远程</b></td><td>无</td></tr>
+<tr><td><code>-Pbrush.publishUsername=</code> / <code>-Pbrush.publishPassword=</code></td><td><b>仅发布用</b>：远程仓库凭据；<b>只在传了 <code>-Pbrush.publishUrl=</code> 时才起作用</b>，且<b>凭据不写进仓库</b>。两个项目共用同一组属性名</td><td>无</td></tr>
+<tr><td><code>-Pbrush.autoBootstrap=</code></td><td><b>构建即自举的逃生阀</b>：传 <code>false</code> 关掉"构建期自动跑 <code>metadata</code>"—— 离线 / CI 想完全自己掌控时用；那时缺件仍然<b>可读失败</b>，不会静默跳过</td><td>默认= 开启自动自举</td></tr>
+</table>
+<p><code>-Pbrush.runMods=</code> 的时序与细节：任务<b>先</b>清空本次运行对应实例的 <code>brush-mods/</code>，<b>再</b>把指定 mod 摆进去，然后启动游戏 —— 顺序不能反，否则刚复制的 jar 会被清掉。给目录时取该目录下全部 <code>*.jar</code>，并打印一行 <code>run mods staged into &lt;目录&gt;: &lt;文件名列表&gt;</code>；条目既不是文件也不是目录 = <b>可读失败</b>。用途是让"带自己的 mod 跑起来测试"不必手工拷 jar；<b>不传该属性时行为与改造前逐字一致</b>。</p>
+<p>承载任务：<code>brush.vanillaJar</code> 与 <code>brush.cache</code> 被 <code>metadata</code> / <code>libraries</code> / <code>assets</code> / <code>installNeoForge</code> / 三个 <code>run*Client</code> 共用；<code>brush.neoforgeInstaller</code> 被 <code>installNeoForge</code> 与 <code>runNeoForgeClient</code> 读取；<code>brushApiJar</code> 只被 <code>apiContractJar</code> 读取；<code>brushCoreJar</code> 只被库模组项目读取；<code>brush.runMods</code> 只被三个 <code>run*Client</code> 读取；<code>brush.publishUrl</code> / <code>brush.publishUsername</code> / <code>brush.publishPassword</code> 只被 <code>publish</code> 任务读取；<code>brush.autoBootstrap</code> 被三个项目的输入校验任务（<code>verifyVanillaJar</code> / <code>verifyInputs</code>）读取；<code>brush.useLocalJars</code> / <code>brush.jitpackVersion</code> / <code>brushCoreJar</code> 只被库模组项目读取。</p>
+<pre><code>:: 只带一个 jar 跑 S1（先清空 run/brush-mods/，再把该 jar 摆进去）
+gradlew.bat runClient -Pbrush.runMods=&lt;你的 mod jar 路径&gt;
+
+:: 带一个目录里的全部 *.jar 跑 S2（多项用平台分隔符 ; 或 :）
+gradlew.bat runFabricClient -Pbrush.runMods=&lt;装着 mod jar 的目录&gt;
+
+:: 不带该属性 = 干净启动（与改造前行为一致）
+gradlew.bat runClient</code></pre>
+
+<h2>自举的真实规模与耗时</h2>
+<p>下载量：</p>
+<table>
+<tr><th>项</th><th>规模</th></tr>
+<tr><td>assets</td><td>约 <b>4750</b> 个对象 / <b>457.7 MB</b></td></tr>
+<tr><td>libraries</td><td><b>59</b> 个 / <b>65.1 MB</b></td></tr>
+<tr><td>natives</td><td><b>10</b> 个</td></tr>
+<tr><td>MC 客户端 jar</td><td><b>38.1 MB</b></td></tr>
+<tr><td>整条 <code>bootstrap</code></td><td>约 <b>2 分 26 秒</b></td></tr>
+</table>
+
+<h2>契约 jar 是可选产物</h2>
+<p><code>apiContractJar</code> 的内容 = 核心的 <code>org/abstruck/brush/api/**</code> <b>加上</b>库模组 jar 里的同名前缀条目。它要取<b>另一个项目</b>的产物，所以：</p>
+<ul>
+<li>库模组产物缺席时，任务用 <code>onlyIf</code> <b>跳过并打印原因与两条出路</b> —— 不再让 <code>gradlew build</code> 失败。</li>
+<li>跳过时的控制台文案形如：<code>apiContractJar SKIPPED -- Brush API jar not found at &lt;path&gt; ; the loader jar does not need it. To also produce the contract jar: build the Brush API project (cd "../Brush API" &amp;&amp; gradlew.bat jar -PbrushCoreJar=...), or pass -PbrushApiJar=&lt;path to brush-api.jar&gt;.</code></li>
+<li>产出时执行机械断言：除目录条目与 <code>META-INF/MANIFEST.MF</code> 外，每个文件都必须落在 <code>org/abstruck/brush/api/</code> 下且<b>不得含 <code>api/impl/**</code></b>；通过则打印 <code>api contract jar: brush-api-contract.jar (N entries, api package only)</code>。</li>
+</ul>
+
+<h2>常见构建失败的可读归因</h2>
+<table>
+<tr><th>症状</th><th>根因</th><th>出路</th></tr>
+<tr><td><code>vanilla jar not found: &lt;path&gt;</code></td><td>只有<b>关掉自动自举</b>（<code>-Pbrush.autoBootstrap=false</code>）或 <code>-Pbrush.vanillaJar=</code> 指到了不存在的路径时才会命中：源码引用 MC 类型，没有 jar 编译不过</td><td>直接重新构建；或跑一次 <code>gradlew.bat bootstrap</code> 一次性备齐；或传 <code>-Pbrush.vanillaJar=&lt;path to 26.1.2.jar&gt;</code> 指到别处已有的 jar</td></tr>
+<tr><td><code>loader core jar not found -- build it first: ...</code></td><td><b>只在本地模式</b>（<code>-Pbrush.useLocalJars=true</code>）下才可能命中：那时 <code>verifyInputs</code> 找不到项目自带的 <code>libs/Brush-*.jar</code>。默认走 JitPack 时这条不适用</td><td>把加载器 jar 放进库模组项目的 <code>libs/</code>；或传 <code>-PbrushCoreJar=</code>；或去掉 <code>-Pbrush.useLocalJars=true</code> 回到 JitPack 模式</td></tr>
+<tr><td><code>NeoForge universal jar not found: &lt;path&gt;</code></td><td><b>可读硬失败</b>：S3 载荷转注册桥<b>编译期</b>就要它，缺了 javac 会报成片"找不到符号"。默认只在<b>关掉自动自举</b>、或安装确实失败时才会冒出来</td><td>四条出路：① 直接重新构建；② 显式跑 <code>gradlew.bat bootstrap</code>或单独 <code>installNeoForge</code>；③ 传 <code>-Pbrush.neoforgeInstaller=&lt;本地安装器 jar&gt;</code> 离线首装；④ 把 <code>-Pbrush.cache=</code> 指向一份<b>已含 <code>neoforge/install</code></b> 的缓存</td></tr>
+<tr><td><code>maven.neoforged.net</code> 不可达 / 安装器下载超时 / TLS 证书链失败</td><td>环境网络问题。<b>S3 首次运行前必须先 <code>installNeoForge</code></b> 把宿主产物备齐</td><td>三条离线路：① <b>拷现成的安装产物</b> —— 把别处已装好的 <code>neoforge/install</code> 整棵拷进<b>缓存目录</b>，harness 识别为"安装已完成"直接跳过安装器；② 用<b>本地安装器</b>；③ 已装好的缓存直接走"安装已完成"快路径，不再联网</td></tr>
+<tr><td><code>brush-api-contract.jar</code> 没产出</td><td>契约 jar 是<b>可选产物</b>：库模组产物缺席时被明确跳过</td><td>按上文"跳过时的控制台文案"给出的两条出路之一补上库模组产物</td></tr>
+<tr><td><code>brush-tools.jar</code> 缺席时 S2 / S3 起不来</td><td><code>-Pbrush.useLocalJars=true</code> 时 <code>libs/</code> 少了 <code>brush-tools.jar</code>—— 于是 classpath 上没有 <code>org.abstruck.brush.tools.*HostHarness</code>，<code>runFabricClient</code> / <code>runNeoForgeClient</code> / <code>installNeoForge</code> 起不来。<b>默认 JitPack 模式不受影响</b></td><td>从加载器项目拷一份 <code>brush-tools.jar</code>放进本项目 <code>libs/</code>；或去掉 <code>-Pbrush.useLocalJars=true</code></td></tr>
+<tr><td>JitPack 坐标解析失败（<code>Could not find com.github.Abstruck-Studio:Brush:…</code>）</td><td>JitPack 上该 tag / branch / commit 不存在或构建失败。解析是<b>惰性</b>的，所以 <code>help</code> / <code>tasks</code> 不会暴露这个问题</td><td>① 用 <code>-Pbrush.jitpackVersion=</code> 换一个可用的 tag / branch / commit；② 或临时用随项目分发的 <code>libs/</code>：<code>-Pbrush.useLocalJars=true</code></td></tr>
+<tr><td><code>brush.runMods entry not found: &lt;path&gt;</code></td><td>该属性指向的条目既不是文件也不是目录</td><td>改传 jar 文件本身，或传"装着 mod jar 的目录"；先 <code>gradlew.bat jar</code> 确保产物已存在</td></tr>
+</table>
+<p class="muted">本页依据两个项目的构建脚本（<code>build.gradle</code> / <code>gradle.properties</code>）与交付说明；产物字节数与条目数为本机对 <code>build/libs/</code> 的实测探测（2026-10-16）。</p>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

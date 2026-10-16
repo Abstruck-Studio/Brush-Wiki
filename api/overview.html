@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>契约面与设计原则 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>契约面与设计原则</h1>
+<p class="lead">Brush API 是加载器项目自己发布的<strong>可选能力库 mod</strong>：加载器只保留"加载器的事"，游戏能力做成一个能被装配、也能缺席的 mod。本页给出版图：契约面是什么、编译期与运行期各由谁提供、三条不可让步的设计原则，以及库模组与加载器之间的边界是怎么划的。</p>
+
+<h2>1. Brush API 是什么</h2>
+
+<p>它是一支<strong>第一方能力库 mod</strong>。判据来自一句很朴素的话：<strong>"这是加载器的事，还是游戏的事？"</strong> —— 在 Fabric 世界里，前者对应 Fabric Loader，后者对应 Fabric API。</p>
+
+<div class="note">
+<strong>它是可选的，不是必需的。</strong>加载器本体不依赖它即可编译与出包；"纯核心"实例也能启动，只是没有内容注册 / 网络 / 创造栏 / HUD 与输入这些能力。反过来要如实知道代价：自检矩阵里的探针测的正是这些能力，所以跑矩阵的实例必须把 <code>brush-api.jar</code> 放进 <code>brush-mods/</code>。
+</div>
+
+<p>项目纪律里那条"mod 不得依赖 L1"已于 2026-10-14 作废：加载器<strong>不规定</strong> mod 能用哪一层，直接用加载器产物或任何 Brush 类都是作者的正当选择。库模组的实现引用 L1 属于 <strong>mod → core</strong> 方向，合法；被禁止的方向始终是 core → mod。</p>
+
+<h2>2. 契约面：<code>org.abstruck.brush.api.**</code></h2>
+
+<table>
+<tr><th>阶段</th><th>用什么</th><th>说明</th></tr>
+<tr>
+  <td>编译期</td>
+  <td><code>brush-api-contract.jar</code>（<code>gradlew apiContractJar</code>）</td>
+  <td>只含 <code>org.abstruck.brush.api.**</code>，<strong>不含 <code>api/impl/**</code></strong>，也不含 L1 的 <code>transform/</code> 与加载器内部 <code>mod/</code> / <code>launch/</code> / <code>host/</code> / <code>ui/</code>。它把"只用对外契约面"变成机械保证：构建守卫逐个条目校验产物，出现 api 包之外的条目就失败；另有单测用"只给契约 jar + vanilla"的 classpath 实弹编译一个碰到 30 个 api 类型的样本</td>
+</tr>
+<tr>
+  <td>运行期</td>
+  <td>库模组 <code>brush-api.jar</code></td>
+  <td>能力实现住在库模组；实例的 <code>brush-mods/</code> 里没有它，对应能力就缺席</td>
+</tr>
+</table>
+
+<p>契约 jar 是<strong>可选产物</strong>：想自我约束"只用对外契约面"的作者可以用它，但用它<strong>不再是要求</strong>。库模组产物缺席时该任务明确跳过并打印原因与出路，不会让 <code>gradlew build</code> 失败。</p>
+
+<p class="note">在 <strong>MDK</strong>里<strong>没有契约 jar</strong> —— 作者的编译面就是能力库坐标 <code>com.github.Abstruck-Studio:Brush-API</code> 所提供的 <code>org.abstruck.brush.api.**</code>；<code>org.abstruck.brush.api.impl</code> 是能力库的内部实现，<strong>不要依赖</strong>。契约 jar 仍存在于完整的加载器项目里，供想机械地把自己约束在契约面上的作者使用。</p>
+
+<h2>3. 三条设计原则</h2>
+
+<div class="cards">
+  <div class="card">
+    <h3>① API 天花板 = 最受约束的平台</h3>
+    <p>S1 下 Brush 是加载器、能力最强；S2/S3 下 Brush 只是宿主上的一个 mod，只能做 mixin 允许的事。<strong>API 不得暴露只有在 S1 才做得到的能力</strong> —— 否则"写一次跑三处"是假承诺。</p>
+  </div>
+  <div class="card">
+    <h3>② 三运行时语义必须一致</h3>
+    <p>同一 API 调用在三个平台的行为、时机、参数语义必须一致，否则 mod 作者仍要写平台分支，"写一次"退化成"写一次 + 三处调试"。</p>
+  </div>
+  <div class="card">
+    <h3>③ 必须提供平台逃生舱</h3>
+    <p>有些事本质上因平台而异。硬统一会把 API 撑畸形 —— <strong>这不是失败，是必要的泄压阀</strong>，用 <code>@BrushExpectPlatform</code> 承载。</p>
+  </div>
+</div>
+
+<p><strong>语义一致怎么落地</strong>：事件 id、注册与派发机制只依赖 JDK 与 Brush 自身的派发表（L1），同一份字节码在 S1/S2/S3 行为一致；<code>api</code> 包对 MC 类型的引用是<strong>惰性载荷引用</strong> —— 注册路径（<code>Event.register</code>）不解析任何 MC 类型，载荷只在事件真正触发、监听器被调用时才解析。触发线程也在契约里：<code>CLIENT_READY</code> / <code>CLIENT_TICK</code> / <code>SCREEN_INIT</code> / <code>SCREEN_RESIZE</code> 在游戏主线程；<code>CLIENT_STOPPING</code> 在 JVM 关闭线程；<code>DATA_LOADED</code> 在构造该服务器的线程，<code>DATA_RELOADED</code> 在重载 future 的完成线程。</p>
+
+<p><strong>逃生舱的契约</strong>（<code>BrushExpectPlatform</code>）：标注在<strong>静态桩方法</strong>上；平台实现类命名 = <code>&lt;桩类全名&gt;Impl</code> + <code>Brush</code> / <code>Fabric</code> / <code>NeoForge</code>，必须声明同名同签名的 static 方法；加载期把桩方法体替换为对实现类的委托调用 —— 运行期成本就是普通 <code>invokestatic</code>，无反射、无查表，注解 CLASS 保留、运行时不可见。<strong>缺失即硬失败</strong>：当前运行时找不到实现类或方法 = 该 mod 加载失败并指明缺哪个，不允许静默回退。</p>
+
+<p class="muted">已登记的风险：G1、G2、G6。</p>
+
+<h2>4. 库模组与加载器的边界</h2>
+
+<table>
+<tr><th>留在加载器核心（加载器契约）</th><th>属能力面（游戏的事）</th></tr>
+<tr>
+  <td>入口点契约 <code>BrushModInitializer</code> / <code>BrushClientModInitializer</code> / <code>BrushDedicatedServerModInitializer</code>；自检契约 <code>ModSelfTest</code> / <code>ModClientTest</code> / <code>ClientTestContext</code>；加载器状态查询 <code>BrushMods</code>；平台逃生舱 <code>BrushExpectPlatform</code>；事件骨架 <code>Event</code> / <code>EventRegistration</code> / <code>BrushEvents</code>；生命周期与数据事件；关闭期留痕 <code>RawStdout</code></td>
+  <td>内容注册、网络、创造栏、HUD 与输入、客户端注册窗口、屏幕事件</td>
+</tr>
+</table>
+
+<p><strong>已执行的搬家（Phase C）与它撞出的真回归。</strong>搬走的是"能力实现 + 承载它的注入点"：网络引擎（<code>BrushPayload</code> / <code>BrushChannels</code> / <code>ReplyGuard</code> / <code>DispatchDedupe</code>）与 S3 宿主桥 <code>NeoForgePayloadBridge</code>、HUD 与输入的三个 mixin、创造栏的两个 mixin、键位的 <code>OptionsMixin</code> —— 包名与类名保持不变。留下的两类东西都有明确理由：</p>
+
+<ul>
+  <li><strong>L2 事件类型留核心</strong>：<code>BrushEvents</code>（L2 事件枢纽）持有它们的监听器类型；一旦搬走，<code>BrushEvents</code> 就反向依赖 mod，方向非法。所以<strong>接口留核心、实现归库模组</strong>，事件字段留在 <code>BrushEvents</code> —— 这同时让 mod 作者既有写法 <code>BrushEvents.NETWORK_PAYLOAD.register(...)</code> 一行都不用改。</li>
+  <li><strong>门面与中性接缝留核心</strong>：<code>BrushNetwork</code> 以<strong>门面</strong>留核心，实现 <code>BrushNetworkImpl</code> 住库模组；核心另有一层中性接缝 <code>host.HostSeams</code>，只把宿主 mod 事件总线<strong>当 <code>Object</code> 递出</strong>，由库模组入口去挂 S3 的桥。</li>
+</ul>
+
+<div class="warn">
+<strong>门面不是洁癖，是一次实机回归换来的。</strong>搬家后 T1/T2/T4 与 S1/S2 实机全绿，唯独 S3 实机在 mod 构造期崩：<code>NoClassDefFoundError: org/abstruck/brush/api/BrushNetwork</code>。根因是 FML 的<strong>包归属规则</strong> —— <code>org.abstruck.brush.api</code> 是<strong>核心模块拥有的包</strong>，宿主加载的代码只在该模块里找，<strong>找不到也不回退</strong>；而 <code>org.abstruck.brush.net.*</code> 搬走后已非核心包，回退可达。于是得出可复用判据：核心 → mod 搬家时，<strong>"包归属"与技术可行性同等重要</strong>。惰性解析还去掉了一个隐式依赖：门面不要求库模组的 <code>onInitialize</code> 比别的 mod 早跑。
+</div>
+
+<p><strong>注入点归属：搬家不是减少。</strong>注入面台账的语义是"对 vanilla 的<strong>全部</strong>改动面"，不是"核心 jar 的改动面"。因此四面核对<strong>跨来源</strong>进行：点数求和、被注入类名取并集，总数不变（当前 21 点 / 16 类）。禁止把"核心点数下降"写成成果。派生纪律：凡动注入点归属，必须同时跑实机探针 —— T1–T3 的退出点都在世界加载之前。</p>
+
+<h2>5. 依赖声明：<code>brush.mod.json</code> 的 <code>depends</code></h2>
+
+<p>用到 API 能力的 mod，应在自己的 <code>brush.mod.json</code> 里声明 <code>brush-api</code> —— 例如随附的示例夹具 mod <code>ping-net</code> 与 <code>durability-hud</code>，元数据里都写 <code>"depends": { "brush": "^26.10.0", "brush-api": "^1.0.0" }</code>。理由两条：<strong>运行期</strong>该能力由库模组提供，实例的 <code>brush-mods/</code> 里必须有 <code>brush-api.jar</code>；<strong>诊断</strong>上缺席时自检原本会甩出难懂的 <code>ClassCastException: BrushPayload cannot be cast to DiscardedPayload</code>，现在改为点名库模组的可读归因，已在暴露该问题的实例上实测生效。</p>
+
+<p>依赖区间语法与元数据字段全表见 <a href="first-mod.html">第一个 mod</a> 与 <a href="reference.html">API 参考索引</a>。</p>
+
+<h2>6. 能力清单</h2>
+
+<table>
+<tr><th>能力</th><th>L2 入口</th><th>实现住在哪</th><th>详见</th></tr>
+<tr>
+  <td>内容注册</td>
+  <td><code>BrushRegistry</code> / <code>BrushRegistration</code></td>
+  <td>核心</td>
+  <td><a href="content.html">内容注册</a></td>
+</tr>
+<tr>
+  <td>网络</td>
+  <td><code>BrushNetwork</code> / <code>NetworkPayloadEvent</code> / <code>ServerPayloadEvent</code></td>
+  <td>门面在核心，引擎与 S3 载荷转注册桥在库模组</td>
+  <td><a href="network.html">网络</a></td>
+</tr>
+<tr>
+  <td>创造栏</td>
+  <td><code>BrushCreativeTab</code> / <code>BrushCreativeTabs</code> / <code>CreativeTabEntries</code> / <code>CreativeTabOutputEvent</code></td>
+  <td>两个 mixin 在库模组；侧栏面板实现（<code>ui/TabSidebar*</code>）仍在核心</td>
+  <td><a href="ui.html">界面与输入</a></td>
+</tr>
+<tr>
+  <td>HUD 与输入</td>
+  <td><code>HudExtractEvent</code> / <code>KeyPressEvent</code> / <code>MouseButtonEvent</code> / <code>MouseScrollEvent</code> / <code>InputAction</code></td>
+  <td>三个 mixin 在库模组；事件类型留核心</td>
+  <td><a href="ui.html">界面与输入</a></td>
+</tr>
+<tr>
+  <td>屏幕事件</td>
+  <td><code>SCREEN_INIT</code> / <code>SCREEN_RESIZE</code></td>
+  <td>注入点仍在核心：加载器自身的 "Mods" 按钮就挂在 <code>screen.init</code> 上，搬走会打断自有功能</td>
+  <td><a href="ui.html">界面与输入</a></td>
+</tr>
+<tr>
+  <td>键位</td>
+  <td><code>BrushKeybinds</code></td>
+  <td><code>keybind/</code> 语义件与注册表在核心，<code>OptionsMixin</code> 在库模组</td>
+  <td><a href="ui.html">界面与输入</a></td>
+</tr>
+<tr>
+  <td>数据注册表</td>
+  <td><code>BrushDataRegistries</code> / <code>BrushRegistry.dataRegistry</code> / <code>DataLoadedEvent</code> / <code>DataReloadedEvent</code></td>
+  <td>核心；装在 Brush 自有 RegistryAccess 里</td>
+  <td><a href="data.html">数据与资源</a></td>
+</tr>
+<tr>
+  <td>事件总线</td>
+  <td><code>Event</code> / <code>EventRegistration</code> / <code>BrushEvents</code></td>
+  <td>核心；派发经 L1 派发表</td>
+  <td><a href="events.html">事件总表</a></td>
+</tr>
+<tr>
+  <td>自检</td>
+  <td><code>ModSelfTest</code> / <code>ModClientTest</code> / <code>ClientTestContext</code></td>
+  <td>核心；退出码即断言通道</td>
+  <td><a href="platform.html">平台适配与自检</a></td>
+</tr>
+<tr>
+  <td>加载器查询</td>
+  <td><code>BrushMods</code></td>
+  <td>核心</td>
+  <td><a href="reference.html">API 参考索引</a></td>
+</tr>
+<tr>
+  <td>平台逃生舱</td>
+  <td><code>@BrushExpectPlatform</code></td>
+  <td>核心</td>
+  <td><a href="platform.html">平台适配与自检</a></td>
+</tr>
+<tr>
+  <td>流体 / 能量能力</td>
+  <td><code>BrushCapabilities</code> / <code>BrushFluidStorage</code> / <code>BrushEnergyStorage</code></td>
+  <td>接口与注册/查询门面在库模组；宿主侧桥（Fabric / NeoForge）也在库模组</td>
+  <td>见下节</td>
+</tr>
+</table>
+
+<h2>7. 流体与能量能力（增量语义）</h2>
+
+<p>从 2026-10-17 起，库模组提供一组<b>方块级</b>的流体 / 能量能力接口。三者都在 <code>org.abstruck.brush.api</code>：</p>
+
+<table>
+<tr><th>类型</th><th>成员</th></tr>
+<tr>
+  <td><code>BrushFluidStorage</code></td>
+  <td><code>tankCount()</code> / <code>fluidIn(int)</code> / <code>amountIn(int)</code> / <code>capacityOf(int)</code> / <code>insert(int tank, Fluid, long maxAmount, boolean simulate)</code> / <code>extract(...)</code> —— 移动类方法<b>返回实际移动量</b>；另有默认 <code>isValid(int tank, Fluid)</code></td>
+</tr>
+<tr>
+  <td><code>BrushEnergyStorage</code></td>
+  <td><code>stored()</code> / <code>capacity()</code> / <code>receive(long maxAmount, boolean simulate)</code> / <code>extract(long maxAmount, boolean simulate)</code>+ 默认 <code>canReceive()</code> / <code>canExtract()</code></td>
+</tr>
+<tr>
+  <td><code>BrushCapabilities</code></td>
+  <td>注册：<code>registerFluidBlock</code> / <code>registerFluidBlockEntity</code> / <code>registerEnergyBlock</code> / <code>registerEnergyBlockEntity</code>；查询：<code>fluid(Level, BlockPos, Direction)</code> / <code>energy(...)</code> 返回 <code>Optional</code>；诊断：<code>registeredCounts()</code></td>
+</tr>
+</table>
+
+<p><b>平台适配全部用宿主本体 API，没有第三方依赖</b>：S3（NeoForge）= <code>Capabilities.Fluid.BLOCK</code>（<code>ResourceHandler&lt;FluidResource&gt;</code>）与 <code>Capabilities.Energy.BLOCK</code>（<code>EnergyHandler</code>）；S2（Fabric）= <code>FluidStorage.SIDED</code>（<code>Storage&lt;FluidVariant&gt;</code>）；<b>S1 只有 Brush 自己的注册表</b>。查询与注册是<b>双向</b>的：我们注册的储能会暴露给宿主 mod，宿主 mod 的储能也能被 <code>BrushCapabilities</code> 查到。</p>
+
+<div class="warn"><b>两点如实登记的边界</b>：① <b>Fabric 的 transfer v1 没有能量模块</b> ⇒ <b>S1 与 S2 的能量只能查 Brush 自己的注册表</b>；NeoForge 侧才有宿主能量。② <b>注册时机是硬约束</b>：必须在<b>你的方块 / 方块实体类型已经存在之后</b>注册；<b>不要在 <code>onInitialize()</code> 里引用 <code>Blocks</code> / <code>BlockEntityType</code></b>。NeoForge 的能力事件只触发一次，晚于它新增的条目不会被转登记。</div>
+
+<p><b>事务语义</b>：用 Brush 接口去操作宿主的 handler时，桥会<b>自己开事务</b> —— 真实写入 commit、模拟 abort / close，<b>不参与调用者的外层事务</b>。</p>
+
+<p><b>有意不做</b>：物品级能力、带数据组件的流体变体、以及把原版方块暴露成能力。</p>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

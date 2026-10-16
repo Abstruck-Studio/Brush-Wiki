@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据与资源 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>数据与资源</h1>
+<p class="lead">本页覆盖 Brush API 的数据与资源面：自定义<b>数据包注册表</b>、
+<code>DATA_LOADED</code> / <code>DATA_RELOADED</code> 两个数据生命周期事件、资源包仓库事件
+<code>PACKS_REGISTERED</code>，以及客户端资源约定与 mod 元数据查询
+（<code>BrushMods</code>）。三运行时（S1 / S2 / S3）共用同一份实现与同一套语义。</p>
+
+<h2>1. 全貌：一次自定义数据包注册表的生命周期</h2>
+
+<table>
+<tr><th>阶段</th><th>谁做</th><th>入口</th><th>时机</th></tr>
+<tr><td>① 登记注册表</td><td>mod</td><td><code>BrushDataRegistries.register(ResourceKey, Codec)</code></td>
+<td>内容注册窗口<b>或之后任意时刻</b>；bootstrap 期不得调用</td></tr>
+<tr><td>② 放条目 JSON</td><td>mod</td><td>jar 内 <code>data/&lt;包ns&gt;/&lt;键路径&gt;/*.json</code></td>
+<td>随资源栈接入</td></tr>
+<tr><td>③ 装载</td><td>Brush</td><td><code>registry.DataRegistryEngine</code></td>
+<td>集成服务器构造完成 / 数据重载完成 —— <b>先装载后派发</b></td></tr>
+<tr><td>④ 读取</td><td>mod</td><td><code>BrushRegistry.dataRegistry(key)</code></td>
+<td>装载完成后任意时机</td></tr>
+</table>
+
+<div class="note">
+<strong>一句话记住它和内容注册的区别。</strong> 物品 / 方块那类走的是 <b>vanilla 注册表</b>——
+必须在唯一的合法窗口注册，晚了就被 <code>freeze</code> 挡住。
+数据包注册表<b>不经 vanilla 注册表</b>：Brush 自有一个引擎和一份 <code>RegistryAccess</code>，
+所以登记没有窗口约束、装载时机由 Brush 决定。代价是<b>vanilla 侧看不到它</b>。
+出处：<code>BrushDataRegistries</code> / <code>BrushRegistry#dataRegistry</code> javadoc、设计文档记载。
+</div>
+
+<h2>2. 登记：<code>BrushDataRegistries</code></h2>
+
+<h3>2.1 签名（以源码为准）</h3>
+
+<pre><code>public static &lt;T&gt; void register(ResourceKey&lt;? extends Registry&lt;T&gt;&gt; key, Codec&lt;T&gt; codec)
+</code></pre>
+
+<dl class="kv">
+<dt>key</dt>
+<dd>注册表键。要求是<b>静态常量单实例</b> —— <code>ResourceKey</code> 在 26.1.2 为<b>身份相等</b>
+登记、读取与 codec 里引用该注册表
+<b>必须用同一个键实例</b>；不同实例即使标识符相同也不会命中。</dd>
+<dt>codec</dt>
+<dd>条目 codec。建议<b>只用 JDK 类型</b>做字段，
+避免「装载期 codec 内嵌 vanilla 注册表查找」这一已知边界。</dd>
+<dt>抛出</dt>
+<dd><code>IllegalStateException</code>：无 mod 上下文，或标识符与已登记注册表重复。<code>NullPointerException</code>：key / codec 为 null。</dd>
+</dl>
+
+<h3>2.2 完整示例</h3>
+
+<p>下面的代码能编译，也是 MDK 里那个配套示例 mod 的实际形态：</p>
+
+<pre><code>// DemoMaterial
+import com.mojang.serialization.Codec;
+import com.mojang.serialization.codecs.RecordCodecBuilder;
+
+public record DemoMaterial(String displayName, int tier) {
+    public static final Codec&lt;DemoMaterial&gt; CODEC = RecordCodecBuilder.create(instance -&gt; instance.group(
+            Codec.STRING.fieldOf("displayName").forGetter(DemoMaterial::displayName),
+            Codec.INT.fieldOf("tier").forGetter(DemoMaterial::tier)
+    ).apply(instance, DemoMaterial::new));
+}
+
+// 入口类（implements BrushModInitializer）里：
+import net.minecraft.core.Registry;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+
+import org.abstruck.brush.api.BrushDataRegistries;
+import org.abstruck.brush.api.BrushEvents;
+import org.abstruck.brush.api.BrushRegistry;
+
+static final ResourceKey&lt;Registry&lt;DemoMaterial&gt;&gt; DEMO_MATERIAL =
+        ResourceKey.createRegistryKey(Identifier.fromNamespaceAndPath("example", "demo_material"));
+
+@Override
+public void onInitialize() {
+    BrushEvents.CONTENT_REGISTRATION.register(event -&gt; {
+        // 内容注册窗口内登记（也可放在之后的任意时机 —— 迟登记下次装载生效）
+        BrushDataRegistries.register(DEMO_MATERIAL, DemoMaterial.CODEC);
+    });
+
+    BrushEvents.DATA_LOADED.register(server -&gt; {
+        // 装载先于派发 —— 这里读到的已是最新视图
+        BrushRegistry.dataRegistry(DEMO_MATERIAL).ifPresent(registry -&gt; {
+            registry.keySet().forEach(id -&gt; {
+                DemoMaterial material = registry.getValue(id);
+                // ...
+            });
+        });
+    });
+}
+</code></pre>
+
+<div class="warn">
+<strong>bootstrap 期不得调用 <code>BrushDataRegistries</code>。</strong>
+该类引用 MC 类型，必须遵守与 <code>BrushRegistry</code> 相同的类加载纪律：
+只能被「注册窗口内会执行的代码」引用——
+不得在引导期路径的方法体或字段初始化器里引用它。
+出处：<code>BrushDataRegistries</code> javadoc、<code>BrushRegistry</code> javadoc「类加载纪律」节。
+</div>
+
+<h2>3. 条目 JSON 放哪：两种布局</h2>
+
+<p>条目文件放在 <code>data/&lt;数据包命名空间&gt;/&lt;键路径&gt;/*.json</code>。关键在于
+<b>条目 id 的命名空间来自数据包目录，与注册表键的命名空间无关</b>。</p>
+
+<table>
+<tr><th>布局</th><th>路径模板</th><th>本项目夹具实例</th><th>说明</th></tr>
+<tr>
+<td><b>vanilla 机制布局</b></td>
+<td><code>data/&lt;包ns&gt;/&lt;键路径&gt;/&lt;名&gt;.json</code></td>
+<td><code>data/example/demo_material/ruby.json</code></td>
+<td><b>三运行时通用</b></td>
+</tr>
+<tr>
+<td><b>宿主命名空间布局</b></td>
+<td><code>data/&lt;包ns&gt;/&lt;注册表ns&gt;/&lt;键路径&gt;/&lt;名&gt;.json</code></td>
+<td><code>data/example/example/demo_material/steel.json</code></td>
+<td>S2 / S3 对非 minecraft 注册表<b>原生就是这个形状</b>；由桥接层读取</td>
+</tr>
+</table>
+
+<p>同名 id 同时存在于两种布局时，<b>以 vanilla 机制布局的文件优先</b>。上面的两条夹具路径
+反序列化的条目 id 分别是 <code>example:ruby</code> 与 <code>example:steel</code>。</p>
+
+<div class="note">
+<strong>为什么需要桥接层。</strong>
+26.1.2 的 vanilla 把条目读在 <code>data/&lt;包ns&gt;/&lt;键路径&gt;/</code>；但 Fabric 的
+<code>RegistriesMixin</code> 与 NeoForge 的补丁会给<b>非 minecraft 注册表</b>前置一段注册表命名空间
+—— 两个宿主独立同向。
+Brush 的 <code>registry.BridgingResourceManager</code> 在<b>执行期</b>按宿主实况布局组装层栈，
+于是两种布局<b>在两个宿主下都能读到</b>，且对 vanilla 零改动、零注入面。
+实证链见实测日志。
+</div>
+
+<p class="muted">标签目录（<code>tagsDirPath</code>）<b>不桥接</b>：数据包注册表的标签需按宿主原生布局放置。
+本轮无标签夹具，属<b>未验证</b>项。</p>
+
+<h2>4. 读取：<code>BrushRegistry.dataRegistry(key)</code></h2>
+
+<pre><code>public static &lt;T&gt; Optional&lt;Registry&lt;T&gt;&gt; dataRegistry(ResourceKey&lt;? extends Registry&lt;T&gt;&gt; key)
+</code></pre>
+
+<p>返回<b>最近一次成功装载的只读视图</b>：未装载 / 未知键时为空。
+无窗口约束、无 mod 上下文约束，任意时机可调用。</p>
+
+<p>多包合并且同名条目冲突时，<b>包列表里靠后的包优先级更高</b>。
+这条方向是实测钉死的：早期 javadoc 曾写「先者优先」并声称有 javap 实证，方向是错的 ——
+由自动断言首轮判红暴露后按实测订正，现已纳入自动断言。实测两条对照：
+<code>[overlayA, overlayB, mod]</code> 取到 <code>overlayB</code> 的值；
+<code>[overlay, mod]</code> 取到 <code>mod</code> 的值。
+出处：设计文档记载与实测结论台账。</p>
+
+<h2>5. 数据生命周期事件：<code>DATA_LOADED</code> vs <code>DATA_RELOADED</code></h2>
+
+<table>
+<tr><th></th><th><code>DATA_LOADED</code></th><th><code>DATA_RELOADED</code></th></tr>
+<tr><td>监听器方法</td><td><code>onDataLoaded(MinecraftServer server)</code></td>
+<td><code>onDataReloaded(MinecraftServer server, Optional&lt;Throwable&gt; error)</code></td></tr>
+<tr><td>L1 来源</td><td><code>MinecraftServer#&lt;init&gt;</code> RETURN（<code>@Inject</code>）</td>
+<td><code>MinecraftServer#reloadResources</code> 整方法 <code>@WrapMethod</code></td></tr>
+<tr><td>触发时机</td><td>集成服务器构造完成 —— <code>server.getResourceManager()</code> 已非空；<b>每服务器实例一次</b></td>
+<td><code>/reload</code> 或数据包变更触发的 <code>reloadResources</code> <b>future 完成</b>；每次重载一次</td></tr>
+<tr><td>线程</td><td>服务器构造线程</td>
+<td>重载 future 的完成线程</td></tr>
+<tr><td>载荷语义</td><td>装载<b>先于</b>派发 —— 监听器读到的就是最新视图</td>
+<td><code>error</code> 为空 = vanilla 重载与 Brush 表重载<b>均成功</b>；非空 = 失败原因</td></tr>
+<tr><td>可取消</td><td>否</td><td>否</td></tr>
+<tr><td>三运行时</td><td>一致</td><td>一致</td></tr>
+</table>
+
+<h3>5.1 典型用法</h3>
+
+<pre><code>BrushEvents.DATA_LOADED.register(server -&gt; {
+    rebuildCache();                     // 世界首次加载：建你的缓存
+});
+
+BrushEvents.DATA_RELOADED.register((server, error) -&gt; {
+    if (error.isPresent()) {
+        // vanilla 重载失败 或 Brush 表重载失败（旧表保留）——
+        // 逐键原因在加载器 ERROR 日志里；这里按降级处理，不要抛
+        return;
+    }
+    rebuildCache();                     // 重载成功：按新视图重建缓存
+});
+</code></pre>
+
+<div class="warn">
+<strong>两个容易踩的点。</strong>
+<ul>
+<li><b><code>DATA_RELOADED</code> 在异步完成线程上。</b> 监听器<b>不得</b>触碰屏幕 / 渲染 / 未同步的游戏状态；
+需要主线程语义的工作请转交调度。
+另有一条<b>有意偏离</b>并已记录在案：该上下文里重抛的异常会被 <code>CompletableFuture</code> 静默吞掉，
+所以引擎在这一处 catch + ERROR，不是静默失败。</li>
+<li><b><code>DATA_LOADED</code> 不要做重活。</b> 它是同步调用，长时间工作会阻塞服务器构造 ——
+重活转交异步或后续生命周期事件。</li>
+</ul>
+</div>
+
+<p class="muted">出处：<code>DataLoadedEvent</code> / <code>DataReloadedEvent</code> javadoc、
+<code>HookEvents#DATA_LOADED</code> / <code>#DATA_RELOADED</code> javadoc、设计文档记载。</p>
+
+<h2>6. 资源：<code>PACKS_REGISTERED</code> 与客户端资源约定</h2>
+
+<h3>6.1 事件语义</h3>
+
+<dl class="kv">
+<dt>L1 来源</dt><dd><code>PackRepository#&lt;init&gt;</code> RETURN（<b>0 新增 footprint</b>）——
+在 <code>ModResourcePacks.attach</code> 的 <code>finally</code> 中派发。</dd>
+<dt>触发时机</dt><dd>每个 <code>PackRepository</code> 实例构造完成时：客户端主仓库 1 次 +
+世界创建界面的数据包选择仓库若干次。派发条件是「<b>注入点命中</b>」，
+不是「挂包成功」—— 命中即派发，含无 mod / 非客户端仓库的情形。</dd>
+<dt>线程</dt><dd>构造该仓库的线程。</dd>
+<dt>可取消</dt><dd>否</dd>
+<dt>三运行时</dt><dd>事件点一致。附带差异：
+S3 下客户端注册的 <b>flush 落地点</b>推迟到首个 <code>PACKS_REGISTERED</code>。</dd>
+</dl>
+
+<h3>6.2 S1 会挂自己的内建资源包 —— 这个事件给 mod 什么机会</h3>
+
+<p>先把事实说清：</p>
+
+<table>
+<tr><th>运行时</th><th>客户端资源仓库</th><th>服务端数据仓库</th></tr>
+<tr><td><b>S1</b>（<code>brush.standalone=true</code>）</td>
+<td>挂 <b>Brush 核心资源包</b> <code>brush_core</code>
++ <b>模组资源包</b> <code>brush_mods</code></td>
+<td>挂 <b>模组数据包</b> <code>brush_mod_data</code></td></tr>
+<tr><td><b>S2 / S3</b></td>
+<td>核心资源包<b>由宿主挂载</b> brush 制品资产；模组资源包仍由 Brush 挂</td>
+<td>同上</td></tr>
+</table>
+
+<p><b>于是这个事件给 mod 的机会是「观测与响应」，不是「再挂一个包」</b>：</p>
+
+<ul>
+<li><b>确认资源栈已就绪。</b> 事件触发时「模组资源包已接入来源集合」，vanilla 随后的
+<code>reload()</code> 会把它们纳入发现与选中 —— 这是你能拿到的最早的「我的资源已经进栈」信号。</li>
+<li><b>做与包状态相关的初始化</b>。
+注意：此刻是仓库<b>构造完成</b>，初始资源 <code>reload</code> 通常<b>尚未完成</b> ——
+真正读取资源要等资源管理器就绪。</li>
+<li><b>做诊断 / 自证</b>。</li>
+<li><b>该事件不提供「注册一个自定义资源包」的 L2 API</b> —— 本事件是无载荷单例，
+只做「通知」；追加资源包来源是加载器自身的行为。</li>
+</ul>
+
+<div class="note">
+<strong>你自己的资源怎么进栈？</strong> 什么都不用做：把资源文件按下面的约定放进 mod jar，
+加载器的 omnibus 模组资源包会在仓库构造时把它们接进资源栈。
+出处：<code>ModResourcePacks</code> javadoc。
+</div>
+
+<h3>6.3 客户端资源约定</h3>
+
+<p>mod jar 内的资源路径就是 vanilla 的资源包路径：</p>
+
+<table>
+<tr><th>类型</th><th>路径</th><th>示例（MDK 示例 mod）</th></tr>
+<tr><td>模型 / 材质 / 语言</td><td><code>assets/&lt;id&gt;/…</code></td>
+<td><code>assets/example/models/item/ruby.json</code>、<code>assets/example/textures/item/ruby.png</code>、
+<code>assets/example/lang/zh_cn.json</code></td></tr>
+<tr><td>方块状态 / 物品定义</td><td><code>assets/&lt;id&gt;/blockstates/…</code>、<code>assets/&lt;id&gt;/items/…</code></td>
+<td><code>assets/example/blockstates/ruby_block.json</code>、<code>assets/example/items/ruby_block.json</code></td></tr>
+<tr><td>数据</td><td><code>data/&lt;id&gt;/…</code></td>
+<td><code>data/example/recipe/ruby_block.json</code></td></tr>
+</table>
+
+<p><b>「资源在三个运行时都由资源系统提供」</b>的意思是：你不需要为 S1 / S2 / S3 准备三份资源，
+也不需要代码分支 —— 上面这些路径在三个运行时都经同一套资源系统（<code>PackRepository</code> →
+<code>ResourceManager</code>）被发现与读取。S1 与 S2/S3 的差别只在「谁把包挂进去」，mod 侧完全一致。</p>
+
+<p class="muted">出处：<code>ModResourcePacks</code> javadoc、设计文档记载与实测结论台账。</p>
+
+<h2>7. <code>BrushMods</code>：查询已加载的 mod</h2>
+
+<h3>7.1 API（签名以源码为准）</h3>
+
+<table>
+<tr><th>方法</th><th>返回</th><th>说明</th></tr>
+<tr><td><code>public static List&lt;ModInfo&gt; list()</code></td><td>不可变列表</td>
+<td>已加载的全部 Brush mod，<b>依赖拓扑序</b>。数据源在实例化任何入口<b>之前</b>就已全量登记 ——
+因此在任意 mod 的 <code>onInitialize()</code> 里调用，看到的是本次加载的全部 mod。</td></tr>
+<tr><td><code>public static Optional&lt;ModInfo&gt; find(String id)</code></td><td><code>Optional</code></td>
+<td>按 id 查询；不存在 = 空 Optional。</td></tr>
+<tr><td><code>public static boolean isLoaded(String id)</code></td><td>boolean</td><td>id 是否已加载。</td></tr>
+<tr><td><code>public static String loaderVersion()</code></td><td>String</td>
+<td>加载器（Brush）版本串 —— 与依赖解析中 <code>brush</code> id 的比对对象同源。</td></tr>
+<tr><td><code>public static String gameVersion()</code></td><td>String</td>
+<td>游戏版本串；加载器尚未初始化时返回 <code>"unknown"</code>。</td></tr>
+</table>
+
+<p>元数据视图是一个只读快照 record：</p>
+
+<pre><code>public record ModInfo(String id, String name, String version, String description,
+        List&lt;String&gt; authors, Path jar) { }
+</code></pre>
+
+<p><code>name</code> 在元数据缺省时回退为 id；<code>description</code> 可为空串；
+<code>authors</code> 可为空列表；<code>jar</code> 是磁盘路径。</p>
+
+<h3>7.2 用法与两个注意点</h3>
+
+<pre><code>import org.abstruck.brush.api.BrushMods;
+
+// 在 onInitialize() 里即可用：已是本次加载的全量（含自身）
+BrushMods.list().forEach(info -&gt;
+        LOGGER.info("[mymod] loaded: " + info.id() + " " + info.version()));
+
+if (BrushMods.isLoaded("brush-api")) {
+    // 依赖的库模组在场
+}
+LOGGER.info("[mymod] loader=" + BrushMods.loaderVersion()
+        + ", game=" + BrushMods.gameVersion());
+</code></pre>
+
+<div class="note">
+<strong>两个注意点。</strong>
+<ul>
+<li><b>不含加载器自身。</b> <code>brush</code> 不在 <code>list()</code> 里——
+加载器版本走 <code>loaderVersion()</code>，游戏版本走 <code>gameVersion()</code>。</li>
+<li><b>零注入点。</b> 纯查询，构建在加载器自身的登记表之上，不触碰任何 vanilla 类，因此天然三运行时一致。
+加载失败时进程在中止路径上，本 API 不参与失败语义。</li>
+</ul>
+</div>
+
+<h2>8. 已知边界（如实登记，别误读）</h2>
+
+<table>
+<tr><th>边界</th><th>含义</th></tr>
+<tr><td><b>对 vanilla 查询不可见</b></td>
+<td>Brush 的数据包注册表装在自己的 <code>RegistryAccess</code> 里，vanilla 侧看不到它 ——
+26.1.2 没有服务器侧「数据包注册表可重载」的公开扩展路径。</td></tr>
+<tr><td><b>远端联机不触发</b></td>
+<td>客户端 JVM 没有 <code>MinecraftServer</code>，所以远端多人服务器下 <code>DATA_LOADED</code> / <code>DATA_RELOADED</code>
+不触发、<code>dataRegistry(...)</code> 恒为空。集成服务器/ LAN 主机正常。Brush 无 dedicated 运行时。</td></tr>
+<tr><td><b>装载失败不中断世界加载</b></td>
+<td>条目 JSON 坏 → 逐键 ERROR 日志、<b>保留旧视图</b>、事件照发。
+mod 侧应经 <code>dataRegistry(...)</code> 空判降级。</td></tr>
+<tr><td><b>标签不桥接</b></td>
+<td>数据包注册表的标签需按宿主原生布局（<code>tagsDirPath</code>）放置 —— 本轮无标签夹具，<b>未验证</b>。</td></tr>
+<tr><td><b>存档目录发现环节</b></td>
+<td>「目录形 <code>PackResources</code> → 引擎装载 → 包序合并」已自动断言；
+但 vanilla 从真实存档目录<b>发现 / 挑选</b>玩家数据包这一步仍需真实世界 + 真实存档，
+列为<b>人工验证项</b>。</td></tr>
+</table>
+
+<footer>Brush Wiki · 本页依据源码注释与实测证据（Brush 26.10.1 / MC 26.1.2）· 覆盖 BrushDataRegistries / BrushMods / DataLoadedEvent / DataReloadedEvent / ResourcePacksRegisteredEvent / ModResourcePacks</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

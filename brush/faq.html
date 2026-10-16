@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>常见问题 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>常见问题</h1>
+<p class="lead">本页收集构建、自举与运行期最常见的 9 个问题，每条按"问题 → 结论 → 依据"写：结论只写能查到的东西，"未验证"就写未验证。构建与命令全貌见 <a href="build.html">构建、产物与命令</a>，矩阵与归因工具见 <a href="diagnostics.html">测试矩阵与诊断</a>。</p>
+
+<h2>1. 新机器上 <code>gradlew build</code> 报"找不到符号: Identifier / ItemStack"</h2>
+<dl class="kv">
+  <dt>结论</dt>
+  <dd>不是代码坏了，是 <strong>vanilla jar 缺失</strong>：main 源集引用 MC 类型，没有 jar 编译不过。先 <code>gradlew bootstrap</code>，或显式指路 <code>-Pbrush.vanillaJar=&lt;26.1.2.jar 路径&gt;</code>。</dd>
+  <dt>依据</dt>
+  <dd>发布版 <code>build.gradle</code> 有独立的 <code>verifyVanillaJar</code> 任务，缺件时抛 <code>vanilla jar not found: … -- run `gradlew.bat bootstrap` first … or pass -Pbrush.vanillaJar=&lt;path&gt;</code>；注释里写明此前不拦会报出成片"找不到符号: Identifier / ItemStack"，让人误以为代码坏了。自举的下载逻辑在独立 <code>bootstrap</code> 源集里、只需要 JDK + gson/log4j，所以"没有 jar ⇒ 编译不过 ⇒ 下不了 jar"的死锁被解掉。</dd>
+</dl>
+
+<h2>2. <code>gradlew build</code> 报 "Brush API jar not found"</h2>
+<dl class="kv">
+  <dt>结论</dt>
+  <dd>契约 jar <code>brush-api-contract.jar</code> 是<strong>可选产物</strong>，而它要取库模组里的那部分 api 类。库模组产物缺席时现在会<strong>明确跳过并打印原因与出路</strong>，不再让 <code>build</code> 失败。要真的产出它，就先构建 <code>../Brush API</code>，或传 <code>-PbrushApiJar=&lt;brush-api.jar 路径&gt;</code>。</dd>
+  <dt>依据</dt>
+  <dd><code>apiContractJar</code> 的 <code>onlyIf</code> 分支：缺件时打印 <code>[brush] apiContractJar SKIPPED -- Brush API jar not found at …; the loader jar does not need it</code> 并给出两条出路；查找顺序 = ① <code>-PbrushApiJar=</code> ② <code>&lt;本项目&gt;/libs/brush-api.jar</code> ③ <code>../Brush API/build/libs/brush-api.jar</code>。构建脚本注释记录：2026-10-16 修 —— 此前把"另一个项目的产物"设成了必需依赖，只构建加载器时报的就是这句话。</dd>
+</dl>
+
+<h2>3. <code>installNeoForge</code> / <code>runNeoForgeClient</code> 长时间卡住或超时</h2>
+<dl class="kv">
+  <dt>结论</dt>
+  <dd>大概率是 <code>maven.neoforged.net</code> 不可达。<strong>已装好的机器不会再碰网络</strong> —— 安装产物完整时直接跳过下载。三条出路：(a) <code>-Pbrush.cache=&lt;dir&gt;</code> 指向已含 <code>neoforge/install</code> 的缓存；(b) 把准备好的 <code>neoforge/install</code> 目录拷进安装目录；(c) <code>-Pbrush.neoforgeInstaller=&lt;本机 neoforge-26.1.2.114-installer.jar&gt;</code>。</dd>
+  <dt>依据</dt>
+  <dd>宿主安装器：先判完整性，已装好即打印 <code>NeoForge installation already present -- installer download skipped (offline OK)</code>；旧实现无条件先下载，于是已装好的机器也会白等 3×2 分钟并以 exit 1 收场。下载失败的异常消息里逐条列出上面三条出路。发布版 <code>build.gradle</code> 也把 <code>-Pbrush.neoforgeInstaller=</code> 登记为"离线首装用"。</dd>
+</dl>
+
+<h2>4. <code>runFabricClient</code> 卡在 "MC libraries: …" 之后</h2>
+<dl class="kv">
+  <dt>结论</dt>
+  <dd>历史上这里是<strong>重复下载注入栈</strong>，来源站不通时会静默等满 3×2 分钟。现在改为<strong>本地已解析的 jar 直接复制</strong>，缺件才退化为下载。看到 <code>[brush] staged locally (no download): &lt;文件名&gt; &lt;- &lt;本地路径&gt;</code> 就说明走了新路径。</dd>
+  <dt>依据</dt>
+  <dd>Fabric 宿主装配器：按 Gradle 通过 <code>--inject-libs=</code> 传入的本地清单先复制再下载，日志行即上句；<code>build.gradle</code> 的注释记录了动机与"给出去之后 harness 直接复制，缺件才退化为下载"。MC 库装配本身命中缓存。</dd>
+</dl>
+
+<h2>5. IDEA 里 mixin 的 <code>method = "run()V"</code> 报红 "Cannot resolve method … in target class"</h2>
+<dl class="kv">
+  <dt>结论</dt>
+  <dd>这是<strong>插件侧限制</strong>，不是代码错误：在无映射配置的手写构建下，插件无从解析 mixin 目标。<strong>运行时不受影响</strong> —— 字符串与类字面量在字节码层面等价，所以本加载器的 11 个 mixin 统一用字符串目标名。</dd>
+  <dt>依据</dt>
+  <dd>目标 mixin 类的源码 javadoc：2026-10-16 曾试改类字面量以消 IDEA 报红，实测<strong>无效</strong>；按用户决定回退为字符串。运行时证据不受影响：<code>require = 1</code> 命中即证明。</dd>
+</dl>
+
+<h2>6. 两个项目要各下一份 500 MB 缓存吗？缓存放在哪？</h2>
+<dl class="kv">
+  <dt>结论</dt>
+  <dd>不用，也不必放进项目里：<strong>MC 侧文件默认落在用户级 Gradle 缓存</strong> —— <code>&lt;gradle 用户目录&gt;/caches/brush/&lt;mcVersion&gt;/&lt;mcVersion&gt;.jar</code> 与 <code>&lt;gradle 用户目录&gt;/caches/brush/cache/**</code>。加载器项目、<code>Brush API</code> 与 MDK 示例项目<strong>默认共享同一份下载</strong>；<strong>项目根不再出现 <code>26.1.2/</code> 与 <code>cache/</code></strong>。要换位置用 <code>-Pbrush.vanillaJar=</code> / <code>-Pbrush.cache=</code>。</dd>
+  <dt>依据</dt>
+  <dd>与 Fabric Loom（<code>caches/fabric-loom</code>）、NeoForge neoform 同款做法；两个项目的候选链里<strong>都已无兄弟项目回退</strong>。迁移实测：三处旧的项目内目录（合计约 2.9 GB）已合并进共享落点后删除；四个项目在新默认下 <code>metadata</code> / <code>libraries</code> / <code>assets</code> / <code>jar</code> 全部 BUILD SUCCESSFUL。<code>run/</code>仍在项目根；<code>libs/</code> 里的 jar 不动。</dd>
+</dl>
+
+<h2>7. 我的 mod 放进 <code>mods/</code> 不生效</h2>
+<dl class="kv">
+  <dt>结论</dt>
+  <dd>约定目录是 <strong><code>brush-mods/</code></strong>，不是宿主的 <code>mods/</code>：S1 用 <code>run/brush-mods</code>，S2/S3 用 <code>run/fabric/brush-mods</code> 与 <code>run/neoforge/brush-mods</code>。这样与宿主 <code>mods/</code> 双向隔离 —— 宿主加载器不会误扫我们的 mod，我们也不会误扫宿主的。</dd>
+  <dt>依据</dt>
+  <dd>项目设计约定与开发速查表的"目录隔离"行；<code>BrushProperties.GAME_DIR</code> javadoc 写明"mods 目录 = 本属性值 + <code>/brush-mods</code>"。另外注意：<strong>Brush 的启动任务会管理 <code>run/brush-mods/</code></strong>，验证第三方 mod 请用独立工程与独立 run 目录，避免被清。</dd>
+</dl>
+
+<h2>8. 为什么发布版没有 <code>runSelftest</code> / <code>compatTest</code>？</h2>
+<dl class="kv">
+  <dt>结论</dt>
+  <dd>有意精简：发布树只保留"产出本体 + 自举运行资产"。T1–T4、实机探针、夹具链与单测、自检源码都留在<strong>含测试装置的完整开发树</strong>里；需要矩阵时用那一份。</dd>
+  <dt>依据</dt>
+  <dd>发布版 <code>build.gradle</code> 头部逐项列出已移除的测试性运行配置（<code>runSelftest</code> / <code>runFabricSelftest</code> / <code>runNeoForgeSelftest</code> / <code>footprintCheck</code> / <code>compatTest*</code> / <code>modTest</code> / <code>runRealityProbe*</code> / <code>runExampleClient*</code> / <code>seed*RealityWorld</code> / <code>generateRealityDriver*</code> / <code>archive*Log</code>）与测试源集；<code>runClient</code> / <code>runFabricClient</code> / <code>runNeoForgeClient</code> 保留。发布说明同样登记"已移除的测试/开发装置"与"等价性核验：精简后本体 jar 与完整开发树的同源产物逐条目零差异"。细节见 <a href="diagnostics.html">测试矩阵与诊断</a> 末节。</dd>
+</dl>
+
+<h2>9. 能不能把 Fabric 和 NeoForge 的 mod 装在同一个实例里？</h2>
+<dl class="kv">
+  <dt>结论</dt>
+  <dd>Brush <strong>明确不做</strong>。不存在两个 loader 平起平坐的并列共存：一个实例只能装一个 loader。Fabric mod 与 Neo mod 要同场，本质是"一个宿主 + 一个翻译层"的移植工程，工作量与本项目同级。</dd>
+  <dt>依据</dt>
+  <dd>项目已拍板的运行模式结论：Fabric 与 NeoForge 互斥；唯一成功的跨生态先例 Sinytra Connector 的真实机制是 NeoForge 当唯一宿主、把 Fabric mod 翻译/适配，并依赖 Forgified Fabric API，兼容性逐 mod 三档判定；反向方案 Kilt 作者自称 very experimental。场景表里 S4 一栏即"明确不做"。Brush 要做的是 S2 / S3 的<strong>叠加共存</strong>：宿主生态的 mod 由宿主自己加载，我们只保证两边在同一 JVM 里不打架。</dd>
+</dl>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

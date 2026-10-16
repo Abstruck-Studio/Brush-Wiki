@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>资源、数据与界面 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>资源、数据与界面</h1>
+<p class="lead">Brush 把三类东西接进游戏：mod jar 里的 <code>assets/**</code>、mod jar 里的 <code>data/**</code>，以及 S1 下加载器自身的资源树 —— 三者都挂在同一个注入点上。加载器自己还带来一套 UI。本页讲"有什么、怎么触发"，细节指向 API 部分。</p>
+
+<h2>S1 的内建资源包 <code>brush_core</code></h2>
+<p>S2 / S3 下宿主会把 brush 制品当资源包挂载，<code>brush</code> 命名空间天然可见。S1没有任何机制挂载我们自己的资源 —— 于是侧栏绘制的 <code>blitSprite("brush:tab_left_*")</code> 全部落空。修复方式是在 standalone 下把<strong>加载器自身的类路径资源树</strong>作为内建资源包 <code>brush_core</code> 接进资源包仓库（<code>BrushCorePackResources</code>）。</p>
+<p><b>为什么需要构建期索引</b>：类路径条目<b>无法在运行期枚举</b>，而 gui 图集的 directory 源要求逐文件 <code>listResources</code>。所以文件清单由构建期任务 <code>generateBrushResourceIndex</code> 扫描加载器自身的 <code>assets/</code> 与 <code>data/</code> 资源目录生成 <code>brush-resources.index</code>，经 <code>processResources</code> 打进类路径根；运行期一次读入充当枚举源。<b>文件内容仍经类路径 <code>getResourceAsStream</code> 直读</b>，目录与 jar 两种形态通用 —— 与默认图标同一通道。</p>
+<table>
+<tr><th>项</th><th>值 / 语义</th></tr>
+<tr><td>包 id</td><td><code>brush_core</code>（<code>BrushCorePackResources.PACK_ID</code>）</td></tr>
+<tr><td>索引资源名</td><td><code>brush-resources.index</code></td></tr>
+<tr><td>分流守卫</td><td><code>Boolean.getBoolean(brush.standalone)</code> —— 与 <code>BrushMixinService.isValid()</code> <b>同一属性</b>，不新增开关；S2/S3 走宿主分支、不重复挂载</td></tr>
+<tr><td>站位</td><td><code>required=true</code> + <code>Position.BOTTOM</code> + <code>fixedPosition=false</code></td></tr>
+<tr><td>索引缺失</td><td>不挂包 + ERROR 告警 + 自检置位，<b>禁止静默降级</b></td></tr>
+</table>
+<p>加载器自身实际提供 <b>9 个</b> <code>assets/</code> 下的 PNG，构建期索引会列出全部。实测日志形如 <code>[brush] core resource index: 9 file(s)</code> 与 <code>attached core resource pack 'brush_core' (standalone; 9 classpath file(s))</code>（<code>run/logs/latest.log</code>，2026-10-16）。早期设计资料记录的是 7 文件档，属纹理增补前的形态 —— 两种数字的差异本身是如实的版本演进痕迹。</p>
+
+<h2>S2 / S3 的差异：资源由宿主挂载</h2>
+<p>同一个注入点（<code>PackRepository#&lt;init&gt;</code> RETURN）在三个运行时都命中，但三档挂载不同：</p>
+<table>
+<tr><th>运行时</th><th>实测 reload 行（原样 / 节选）</th><th>我们的包的位置</th></tr>
+<tr><td>S1</td><td><code>Reloading ResourceManager: vanilla, brush_mods, brush_core</code></td><td>最后 = 高于 vanilla</td></tr>
+<tr><td>S2</td><td><code>Reloading ResourceManager: vanilla, fabric-api, …, fabricloader, sodium, brush_mods</code></td><td>最后 = 最高</td></tr>
+<tr><td>S3</td><td><code>Reloading ResourceManager: brush_mods, vanilla, mod_resources, mod/sodium, mod/brush, mod/neoforge</code></td><td>最前 = <b>最低</b></td></tr>
+</table>
+<p>查找语义决定这个顺序的意义：<code>openAllSelected()</code> 按选中列表顺序构造 <code>MultiPackResourceManager</code>，<code>getResource</code> 自表尾向前扫描、首个命中者胜出 —— <b>列表越靠后优先级越高，reload 日志行的顺序即该列表顺序</b>。因此 S1/S2 下 <code>用户资源包 &gt; 模组资源 &gt; vanilla</code>；<b>S3 是已登记的例外</b>：NeoForge 重排包序后我们的包在最底，mod 资源<b>不覆盖</b> vanilla 与宿主 mod 资源。S2 下与 <code>fabric-resource-loader-v1</code> 在同位置各读 <code>this.sources</code>，任意先后施加互不抹除。</p>
+
+<h2>mod 自带资源与数据</h2>
+<p>每个 mod jar 根下按 vanilla 布局放文件即可，<b>mod 侧零代码、零注入</b>：</p>
+<pre><code>brush.mod.json                                 ← 元数据
+assets/&lt;mod-id&gt;/items/ruby.json                ← 物品模型定义（26.1.2 格式）
+assets/&lt;mod-id&gt;/models/item/ruby.json          ← 模型（item/generated + layer0）
+assets/&lt;mod-id&gt;/lang/en_us.json / zh_cn.json   ← 语言（键如 item.example.ruby）
+assets/&lt;mod-id&gt;/textures/item/ruby.png         ← 材质（16x16）
+data/&lt;包命名空间&gt;/...                          ← 配方 / 进度 / 战利品表 / 自定义注册表条目</code></pre>
+<pre><code>// items/ruby.json
+{ "model": { "type": "minecraft:model", "model": "example:item/ruby" } }
+// models/item/ruby.json
+{ "parent": "minecraft:item/generated", "textures": { "layer0": "example:item/ruby" } }
+// lang：{ "item.example.ruby": "Ruby" } / { "item.example.ruby": "红宝石" }</code></pre>
+<p>机制：<b>一个包聚合全部 mod jar</b>，footprint 恒为 1 个来源、不随 mod 数增长；命名空间天然由 <code>assets/&lt;mod-id&gt;/</code> 区分。<code>ModPackResources</code> 直接开 mod jar 查条目，读取语义镜像 vanilla 的 <code>FilePackResources</code>；<code>SERVER_DATA</code> 返回空集。<code>pack.png</code> / <code>pack.mcmeta</code> 不参与：包元数据全部由代码程序构造。</p>
+
+<h2>数据包注册表扩展（G1）</h2>
+<p><code>api.BrushDataRegistries.register(ResourceKey, Codec)</code> 是 mod 自定义数据包注册表的<b>唯一登记入口</b>；读取经 <code>BrushRegistry.dataRegistry(key)</code> 返回 <code>Optional&lt;Registry&lt;T&gt;&gt;</code>。</p>
+<ul>
+<li><b>为什么是 Brush 自有的 <code>RegistryAccess</code></b>：26.1.2 已无 vanilla 服务器侧"数据包注册表可重载"路径 —— 4 参 <code>RegistryDataLoader.load(ResourceManager,...)</code> 只被 <code>WorldLoader</code> 以 worldgen / dimension 表调用，<code>/reload</code> 只重载 loot 表 ⇒ 把 mod 表并入 vanilla 表清单不可行。</li>
+<li><b>装载机制全部复用 vanilla 公开 API</b>：<code>RegistryDataLoader$RegistryData</code> 公开 record 构造器 + <code>RegistryValidator.NONE</code>、<code>ResourceManagerRegistryLoadTask</code> 的公开构造器与 <code>load</code> / <code>freezeRegistry</code> / <code>validateRegistry</code>、<code>MappedRegistry</code>、<code>RegistryAccess$ImmutableRegistryAccess</code> + <code>freeze()</code>。</li>
+<li><b>装载算法</b>（<code>DataRegistryEngine.reload</code>）：快照登记 → 每项建 load task→ 稀疏跨注册表查找器 → 并行 <code>load</code> + <code>allOf().join()</code>→ <b>按登记序冻结，再统一校验</b>→ 全通过则原子替换当前视图。</li>
+<li><b>登记时机</b>：内容注册窗口或之后任意时刻；<b>bootstrap 期不得调用</b>。</li>
+<li><b>键身份</b>：<code>ResourceKey</code> 在 26.1.2 是<b>身份相等</b>—— 登记、读取与 codec 中引用它必须用<b>同一键实例</b>。</li>
+</ul>
+<table>
+<tr><th>布局</th><th>条目路径</th></tr>
+<tr><td>vanilla 机制布局</td><td><code>data/&lt;包命名空间&gt;/&lt;键路径&gt;/*.json</code> —— mod 侧按此放置即可三运行时通用</td></tr>
+<tr><td>宿主命名空间布局</td><td><code>data/&lt;包命名空间&gt;/&lt;注册表命名空间&gt;/&lt;键路径&gt;/*.json</code> —— S2/S3 对非 minecraft 注册表会前置注册表命名空间，由桥接层兜住</td></tr>
+</table>
+<p>桥接层 <code>BridgingResourceManager</code> <b>零注入面</b>：<code>wrapIfNeeded</code> 按每个登记键的运行时 <code>Registries.elementsDirPath(key)</code> 组装层栈，两布局都可读、同名 id 以 vanilla 机制文件优先；无需桥接时原样透传。条目 id 的命名空间来自<b>数据包目录</b>，与键的命名空间无关。多包合并<b>靠后的包优先</b>。<b>标签目录不桥接</b> —— 需按宿主原生布局放置。</p>
+<p><b>数据加载 / 重载事件</b>：<code>BrushEvents.DATA_LOADED</code> 锚在 <code>MinecraftServer#&lt;init&gt;</code> RETURN，<code>DATA_RELOADED</code> 用 <code>@WrapMethod</code> 包 <code>reloadResources</code>。<b>线程注记</b>：前者派发于服务器构造线程，后者派发于完成线程—— 监听器不得触碰屏幕 / 渲染。</p>
+<p><b>错误语义</b>：任一 freeze / validate 失败 → 逐键 ERROR 日志、<b>保留旧视图</b>、返回 false；首次装载失败则视图保持 null，mod 经 <code>dataRegistry(key)</code> 空判降级。数据错误<b>不中止世界加载</b> —— Brush 的表独立于 vanilla 数据，不该因一条坏 JSON 让整个存档进不去。已知边界：vanilla 侧看不到我们的注册表；客户端 JVM 无 <code>MinecraftServer</code> 时事件不触发、<code>dataRegistry</code> 为空。</p>
+
+<h2>加载器自带的界面面</h2>
+<table>
+<tr><th>件</th><th>怎么触发</th><th>做什么</th></tr>
+<tr><td><code>ui.ModsScreen</code></td><td>标题界面的 <code>Mods</code> 按钮</td><td>卡片网格展示 Brush 自身条目 + <code>ModBootstrap.modEntries()</code>；点卡片原地展开详情条；点空白处收起；Done / ESC 返回父屏</td></tr>
+<tr><td>标题界面按钮（<code>ModsTitleButton</code>）</td><td>由 <code>screen.init</code> / <code>screen.resize</code> 两个 TAIL 事件驱动</td><td>20×20 方形图标按钮，<b>锚定运行时的辅助功能按钮实例</b>；每次事件"先移除再添加"保证恰好一枚</td></tr>
+<tr><td>创造栏左侧标签栏（<code>ui/TabSidebar*</code>）</td><td>打开创造模式物品栏</td><td>物品栏面板左缘外侧的自绘竖列：自有标签页行、选中 / 悬停高亮、底部 <code>&lt; n/m &gt;</code> 翻页条；<b>0 新增注入点</b></td></tr>
+<tr><td>默认图标 <code>ui.ModIconLoader</code></td><td>按钮挂载前与列表 <code>init</code> 两个预载点</td><td>默认图标 = 加载器自身元数据 <code>icon</code> 字段派生的类路径资源；mod 自定义图标 = 各 jar 元数据的 <code>icon</code>。回退链任何一环都不抛异常：条目缺失 / 是目录 / 解码失败 / IO 异常 → warn + 回退默认图标；默认图标也失败 → 告警一次、跳过图标。纹理<b>刻意不注册 TextureManager</b>，直接消费 <code>GpuTextureView</code> ⇒ 对资源重载（F3+T）免疫</td></tr>
+</table>
+<p class="note">本页只写"有什么、怎么触发"。界面注入点选址、动画模型与逐版改版记录属设计文档记载；事件与 API 面见 <a href="../api/ui.html">界面与输入</a>。</p>
+
+<h2>mod 访问器与外部工程接线（结论）</h2>
+<p>一句话结论：<b>先查已由 Brush 代管的清单</b> —— 实体类型 / 属性 / 刷怪放置 / 方块实体类型 / 菜单类型 / 实体渲染器 / 方块实体渲染器 / 菜单屏幕这 8 类注册场景一律走 <code>BrushRegistry</code>，mod 不必自己写 accessor mixin 或反射；其余 private 成员用接口型 mixin 的 <code>@Invoker</code>/ <code>@Accessor</code>，成员加 modid 前缀、目标名用官方名，且可见性不变。<b>不要</b>给 vanilla 类加 <code>@Unique</code> 字段 —— 需要关联数据时用外部 <code>WeakHashMap</code>。外部 Gradle 工程不依赖 Brush 源码仓即可编译与本地运行，最小模板见 <a href="../api/first-mod.html">第一个 mod</a> 与交付说明。</p>
+<p class="muted">本页依据：<code>ModResourcePacks</code> / <code>BrushCorePackResources</code> / <code>DataRegistryEngine</code> / <code>BridgingResourceManager</code> / <code>BrushDataRegistries</code> 的源码与 javadoc、<code>run/logs/latest.log</code>、以及实测结论台账。</p>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>注入层 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>注入层</h1>
+<p class="lead">注入层在类首次加载前改写 vanilla 字节码，并在每个目标方法上只织入一条 <code>Dispatcher.fire(...)</code> 静态调用。它由 sponge-mixin与 MixinExtras 承担，经自研 <code>BrushMixinService</code> 接进 Brush 自己的 <code>ClassLoader</code>。指令之后发生的事见 <a href="dispatch.html">派发层与事件</a>，形态约束见 <a href="limits.html">最小改动原则与禁止清单</a>。</p>
+
+<h2>为什么必须「类加载期改写」</h2>
+<p>Java 方法调用的语义在类加载时即固定：调用点编译为 <code>invokevirtual</code> / <code>invokestatic</code>，目标已解析，运行时没有可插手的中间环节。</p>
+<table>
+<tr><th>机制</th><th>能拿 / 能改入参</th><th>为何不可用</th></tr>
+<tr><td>JVMTI <code>MethodEntry</code></td><td>否 / 否</td><td>每次方法调用都触发同步回调，VM 退出大量 JIT 优化路径</td></tr>
+<tr><td>JDI / 调试器断点</td><td>能 / 否</td><td>须跑在调试模式；<code>setValue</code> 只对挂起线程有效</td></tr>
+<tr><td>JFR / AsyncGetCallTrace</td><td>否 / 否</td><td>只能观测</td></tr>
+<tr><td>动态代理 <code>Proxy</code></td><td>仅接口 / 否</td><td>vanilla 不给替换实现的机会</td></tr>
+</table>
+<p><strong>决定性反证：连 Arthas 也是靠字节码织入拿参数。</strong> 它的 <code>watch</code> 走 <code>retransformClasses</code> 重定义目标类，再用 ASM 往方法体里织入 <code>AdviceListener</code> 调用，由织入的字节码把参数回传 —— 不是运行时监控。这是本项目对外部进程 / 外部监控方案的评估结论。</p>
+<div class="note">
+<strong>Mixin 本来就是运行时变换。</strong> 它跑在 Java Agent 之上，于<strong>类加载时</strong>在内存中改写字节码，磁盘 jar 一个字节没动；所谓「静态」仅指注入点写死在代码里。真正的痛点是「加一个 hook 就要重新 transform，还容易和别人冲突」，薄注入 + 运行时派发正是对它的解法。
+</div>
+<p>为什么必须抢在「首次加载前」？<code>retransformClasses</code> 不能增删方法 / 字段、不能改签名 / 继承，只能改方法体；<code>ClassFileLoadHook</code>能力最全。这条限制使 load-time 成为唯一完整路线，也是 Fabric / Mixin 的选择。</p>
+
+<h2>服务栈怎么接进自研 ClassLoader</h2>
+<p>硬约束：<strong>注入栈必须与游戏类同处一个类加载器</strong> —— 被注入的 vanilla 字节码会引用注入点两侧的类，跨类加载器会产生类型身份错位。</p>
+<pre><code>Brush（app 侧：只做装配）
+  │  ① new BrushClassLoader(urls = 库 + MC 产物 + mixin/mixinextras/asm/本工程类与资源)
+  │  ② 反射 Class.forName("org.abstruck.brush.transform.TransformBootstrap", true, loader)
+  │  ③ 经 JDK 类型桥接拿到游戏侧 transformer 函数
+  │  ④ 注册为 BrushClassLoader 的 ClassTransformer
+  ▼
+BrushClassLoader（游戏侧）
+   findClass ── bytes ──► MixinTransformer.transformClassBytes(name, name, bytes)
+  ▼
+net.minecraft.client.main.Main（反射调用）</code></pre>
+<p>app 侧与游戏侧<strong>不共享任何自定义类型身份</strong>：交界只有 JDK 类型 <code>BiFunction&lt;String,byte[],byte[]&gt;</code>。</p>
+<ul>
+<li><strong><code>BrushMixinService</code> 是必需件</strong>：sponge-mixin 的 jar 只注册 LaunchWrapper / ModLauncher 两个 <code>IMixinService</code>，<strong>没有通用服务</strong>。本类 <code>extends MixinServiceAbstract</code>，补齐剩余抽象方法并实现四个子接口；经工厂创建活动 <code>IMixinTransformer</code>。Fabric 的 Knot 走同一条路 —— 取舍依据见该服务的 javadoc。</li>
+<li><strong><code>BrushGlobalPropertyService</code> 是强制件</strong>：mixin 的 <code>GlobalProperties</code> 无可用 provider 时 <code>initPropertyService()</code> 直接抛 <code>ServiceNotAvailableError</code>，而 <code>MixinBootstrap</code> 启动路径立即触碰；自带两个 provider 分别依赖 LaunchWrapper / ModLauncher 类。实现为 map-backed，<strong>按对象引用原样存取</strong> —— MixinExtras 的 Blackboard 用 <code>new Object[1]</code> 值容器惯用法，复制值会坏。</li>
+<li><strong>standalone 守卫</strong>：<code>BrushMixinService.isValid()</code> 仅当系统属性 <code>brush.standalone=true</code> 时返回 <code>true</code>，而该属性只由 <code>TransformBootstrap.install()</code> 设置 —— S2/S3 下宿主的引导路径不会设置它，宿主因此跳过我们的服务。</li>
+<li><strong>classpath 顺序是正确性前提</strong>：S1 扫描会看到三个候选，而 <code>ServiceLoader.hasNextService</code> 只捕获 <code>NoSuchMethodException</code>，其余 <code>Throwable</code>原样上抛；LaunchWrapper 服务的构造器需要 S1 下不存在的 <code>net.minecraft.launchwrapper.LaunchClassLoader</code>。故我方条目必须排在 sponge-mixin jar <strong>之前</strong>，这条顺序已固化在 <code>build.gradle</code> 的运行任务里并就地注释。</li>
+</ul>
+
+<h2>TransformBootstrap：引导顺序与快速排除</h2>
+<p><code>install()</code> 的顺序即契约，不可换：</p>
+<ol>
+<li><code>setProperty("brush.standalone","true")</code> —— <strong>必须是第一条语句</strong>：下一行 <code>MixinBootstrap.init()</code> 就会实例化我们的服务并立即调用 <code>isValid()</code>。</li>
+<li><code>MixinBootstrap.init()</code> —— 注册子系统、offer <code>MixinTransformer.Factory</code>、初始化环境并下发 phaseConsumer。</li>
+<li><code>createTransformer()</code> —— 取工厂创建活动 transformer。</li>
+<li><code>MixinExtrasBootstrap.init()</code> —— <strong>必须晚于第 3 步</strong>：其内部访问「活动 transformer」，未创建会空指针。</li>
+<li><code>setSide(CLIENT)</code> —— 无平台 agent 时 <code>getSideName()</code> 为 UNKNOWN，显式设为客户端以启用 side stripping 语义。</li>
+<li><code>gotoDefaultPhase()</code> —— <code>gotoPhase</code> 为包私有，宿主唯一合法推进通道是 <code>wire()</code> 保存的 phaseConsumer。</li>
+<li><code>Mixins.addConfiguration("brush.mixins.json")</code> 并<strong>复核注册结果</strong>。</li>
+<li><code>CoreHooks.install()</code> —— 注册核心监听器，至此派发表可用。</li>
+</ol>
+<div class="warn">
+<strong>配置注册必须复核。</strong> <code>Mixins.createConfiguration</code> 在解析失败时只记一条 ERROR 就丢弃配置 —— 不复核会表现为「启动正常、日志干净、hook 全不存在」。<code>MixinConfigRegistry.registerAndVerify</code> 因此确认新配置确实入了待选队列，否则硬失败。
+</div>
+<p><strong>引导前的一次「提前触碰」</strong>：<code>install()</code> 开头先调一次 <code>FastExclusion.enabled()</code>，把该嵌套类定型。否则管线回调内首次引用它 → 经 <code>BrushClassLoader.findClass</code> 重入回调 → 无限递归（<code>StackOverflowError</code>），且递归发生在放行前缀判定<strong>之前</strong>。此刻安全：<code>Brush</code> 在 <code>install()</code> 返回后才注册 transformer，<code>findClass</code> 尚未触达管线。</p>
+<p><strong>快速排除（<code>FastExclusion</code>）</strong>：启动期经本加载器定义的类数以万计，绝大多数是纯库 / JDK 类，不可能含我们的注入点。管线在进入 <code>transformClassBytes</code> 前做<strong>白名单制前缀判定</strong>：</p>
+<ul>
+<li><strong>放行</strong>：<code>net.minecraft.*</code>、<code>org.abstruck.brush.*</code>、宿主包（<code>net.fabricmc.*</code> / <code>net.neoforged.*</code> / <code>cpw.mods.*</code>）、mixin 与 ASM 工具库，<strong>以及所有其余未知命名空间</strong>。</li>
+<li><strong>排除</strong>：<code>java.</code> / <code>javax.</code> / <code>jdk.</code> / <code>sun.</code> / <code>com.sun.</code> / <code>com.google.gson.</code> / <code>com.google.common.</code> / <code>com.mojang.</code> / <code>io.netty.</code> / <code>org.apache.logging.</code> / <code>org.lwjgl.</code> / <code>it.unimi.dsi.</code> / <code>org.slf4j.</code> / <code>kotlin.</code>。</li>
+<li><strong>开关</strong>：<code>-Dbrush.fast.exclusion=false</code> 整体关闭，全部类照送管线，零行为变化；这是加载期短路，不改 footprint。</li>
+</ul>
+
+<h2>brush.mixins.json 的结构</h2>
+<pre><code>{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "org.abstruck.brush.transform.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "injectors": { "defaultRequire": 1 },
+  "mixins": [ "BootstrapMixin", "BuiltInRegistriesMixin", "PackRepositoryMixin",
+              "MinecraftServerMixin", "CrashReportMixin" ],
+  "client": [ "MinecraftMixin", "ScreenMixin", "ScreenAccess",
+              "CreativeScreenAccess", "KeyboardAccess", "MouseAccess" ]
+}</code></pre>
+<dl class="kv">
+<dt>required / defaultRequire</dt><dd><code>required: true</code> + <code>defaultRequire: 1</code> —— 见下节硬失败语义。</dd>
+<dt>compatibilityLevel</dt><dd><code>JAVA_25</code>：26.1.2 类文件主版本 69（Java 25），所用 sponge-mixin 0.17.4 的 <code>CompatibilityLevel</code> 枚举含 <code>JAVA_25</code>。</dd>
+<dt>mixins 段</dt><dd>共同目标（<code>server.Bootstrap</code> / <code>BuiltInRegistries</code> / <code>PackRepository</code> / <code>MinecraftServer</code> / <code>CrashReport</code>）。</dd>
+<dt>client 段</dt><dd>目标全在 <code>net.minecraft.client.*</code> 的类。<code>MixinConfig.prepare()</code> 按 <code>env.getSide()</code> 备选数组（CLIENT → <code>client</code>）；<code>setSide(Side.CLIENT)</code> 与 <code>addConfiguration</code> 共用同一 env 实例，故三运行时 client 段均被备选。</dd>
+<dt>accessor / invoker</dt><dd>包内的 <code>ScreenAccess</code> / <code>CreativeScreenAccess</code> / <code>KeyboardAccess</code> / <code>MouseAccess</code> 只产生访问桥接方法，<strong>不产生注入指令、不计入被注入类</strong>。</dd>
+<dt>无 refmap</dt><dd>三运行时统一官方名，注入点定义一套即可，配置<strong>永不</strong>声明 <code>refmap</code> 键。库模组 <code>brush-api</code> 用自己的 mixin 配置，经 <code>brush.mod.json</code> 的 <code>mixins</code> 字段注册。</dd>
+</dl>
+
+<h2>注入器选择表：可链式 vs 不可链式</h2>
+<p>「可链式」= 多个注入器作用于同一位置时能否叠加共存 —— 这是 S2/S3 能否成立的技术前提。</p>
+<table>
+<tr><th>注入器</th><th>可链式</th><th>说明</th></tr>
+<tr><td><code>@Overwrite</code></td><td>否</td><td>完全替换方法体、丢弃原实现，破坏同一方法上的一切 —— <strong>本项目禁止</strong></td></tr>
+<tr><td><code>@Redirect</code> / <code>@ModifyConstant</code></td><td>否</td><td>同一目标只能重定向一次</td></tr>
+<tr><td><code>@Inject(HEAD) + ci.cancel()</code></td><td>否</td><td>会阻止其他注入运行，非必要不要用</td></tr>
+<tr><td><code>@Inject</code></td><td>是</td><td>可堆叠，最安全，首选</td></tr>
+<tr><td><code>@ModifyExpressionValue</code> / <code>@ModifyReturnValue</code> / <code>@WrapOperation</code> / <code>@WrapWithCondition</code></td><td>是</td><td>MixinExtras 提供</td></tr>
+<tr><td><code>@WrapMethod</code></td><td>是</td><td>MixinExtras 提供，<code>@Overwrite</code> 的可链式替代；多个 mod 可依次包装同一方法形成调用链</td></tr>
+</table>
+<p>注入面台账里的真实分布正是这张表的结果：多数点是 <code>@Inject</code>，少数用 MixinExtras 包装类注入器。</p>
+<div class="warn">
+<strong>一条实测硬限制：</strong> 键位注册<strong>首选</strong>的 <code>@WrapOperation</code> 包 PUTFIELD 撞 JVM 限制 —— <code>IllegalAccessError: Update to non-static final field … attempted from a different method (mixinextras$bridge$…)</code>：非静态 final 字段只准在初始化它的方法内写，而字段写包装必经桥方法。<strong>故对 final 实例字段的字段写包装一律不可行</strong>。
+</div>
+
+<h2>require=1 的硬失败语义</h2>
+<p>所有 hook 默认 <code>require = 1</code>，配置声明 <code>required: true</code> / <code>defaultRequire: 1</code>：<strong>启动期校验全部注入点命中，未命中即中止启动并指明是哪个 hook，不允许 <code>required=false</code> 静默降级</strong>。</p>
+<p>它针对的是<strong>形态 A</strong>：别人的 <code>@Overwrite</code> 若先于我们的 <code>@Inject</code> 施加，方法体已被换掉、注入点可能不复存在，<code>require=1</code> 会报 <code>Critical injection failure</code> 并可被捕获；<code>required=false</code> 则静默跳过 —— 那是最危险的做法。日志里 <code>failed injection check … (0/1) succeeded</code> 的典型含义是「找到了，但被别的东西抢先 / 改变了」。</p>
+<p><strong>形态 B</strong>由启动期扫描并告警捕获，priority 顺序控制是第二层 —— 三层防御的完整口径属项目纪律的《注入共存与冲突防御》一节。</p>
+
+<h2>当前注入面规模</h2>
+<table>
+<tr><th>指标</th><th>当前值</th><th>出处</th></tr>
+<tr><td>注入点数</td><td><strong>21</strong></td><td>注入面台账摘要行「当前总数：21」；代码镜像 <code>InjectionLedger.ENTRIES</code>；四面校验基线 <code>FootprintCheck.BASELINE_POINTS = 21</code></td></tr>
+<tr><td>被注入 vanilla 类数</td><td><strong>16</strong></td><td>同摘要行「被注入 vanilla 类数：16」；<code>BASELINE_CLASSES = 16</code></td></tr>
+</table>
+<p>启动日志按项目纪律的要求打印同一组数字，日志原文形如 <code>[brush] injection points: 21, injected vanilla classes: 16 (footprint ledger: …)</code>，由 <code>InjectionLedger.summary()</code> 生成。注入面跨 jar 分散，但<strong>台账单点登记</strong>，归属由行末 <code>[source=…]</code> 标注。</p>
+<div class="warn">
+<strong>数字口径差异：</strong> 早期资料仍写 <code>18 点 / 13 类</code>，与当前台账表和四面校验基线不符 —— <strong>以台账表与基线为准</strong>。另：<code>HookEvents</code> 类的注释自称「全部 17 个 id」，而该文件实际有 18 个常量。<span class="badge">口径差异</span>
+</div>
+
+<h2>一个真实注入点剖析：CrashReport#getDetails</h2>
+<pre><code>@Mixin(targets = "net.minecraft.CrashReport")
+public abstract class CrashReportMixin {
+
+    @Inject(method = "getDetails(Ljava/lang/StringBuilder;)V", at = @At("TAIL"), require = 1)
+    private void brush$appendBrushSection(StringBuilder builder, CallbackInfo callback) {
+        Dispatcher.fire(HookEvents.CRASH_REPORT_DETAILS, builder);
+    }
+}</code></pre>
+<dl class="kv">
+<dt>为什么是这个方法</dt><dd><code>getDetails(StringBuilder)</code> 是 26.1.2 里<strong>报告正文的唯一组装点</strong>。TAIL 处追加即可把 Brush 段写进用户看到的崩溃报告 —— 「混合环境出问题时能自证我们做了什么」的最短路径。</dd>
+<dt>选址档位</dt><dd>TAIL 属选址纪律的<strong>第 2 档首选</strong>（HEAD / TAIL / RETURN）：只依赖方法存在，不依赖方法内部结构；避开更深的 <code>INVOKE</code> 与 <code>CONSTANT</code> / 高 ordinal 这类脆弱定位。</dd>
+<dt>织入了什么</dt><dd>恰好 1 条 <code>Dispatcher.fire(...)</code> 调用指令；不改控制流、不改返回值、不动 vanilla 类结构。目标是实例方法，handler 同为实例；<code>targets=</code> 用字符串而非类字面量，使配置解析期不需要加载 MC 类型。</dd>
+<dt>共存性</dt><dd><code>@Inject(TAIL)</code> 可链式：不抢占、不替换，其他 mod 在同一方法的注入互不抹除。handler 侧语义是<strong>只追加不清空</strong>载荷内容（<code>CoreHooks.registerInfoCrashReport</code>）—— 清空 / 重排才是独占式语义，正是可链式纪律要避免的。</dd>
+<dt>冷热</dt><dd>纯冷路径：只有真崩溃且有人取报告正文时才走一次，正常游玩与自检（T1/T2/T3）中<strong>恒 0 次</strong>，因此计入自检的<strong>信息集</strong>而非期望集 —— 否则注入命中审计会在三场里误报缺失。</dd>
+</dl>
+<div class="note">
+<strong>另两个选址样例：</strong> ① <code>BootstrapMixin</code> 钉在 <code>Bootstrap.bootStrap()</code> 的 HEAD —— vanilla 最早且必然执行的方法，HEAD 先于同一方法内的 <code>BuiltInRegistries.bootStrap()</code>，使「引导先于内容注册」成为结构性事实；织入指令为 <code>EarlyBoot.onBootstrap()</code>。② <code>MinecraftMixin</code> 在 <code>run()V</code> / <code>tick()V</code> 各一个 HEAD 点：<code>run</code> 非热路径，织入 <code>ClientBoot.onClientRun()</code>；<code>tick</code> 是热路径（约 20 次/秒），无监听器时只是一次 <code>ConcurrentHashMap</code> 查找加空判断。
+</div>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

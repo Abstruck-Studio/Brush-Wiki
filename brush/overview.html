@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>定位与整体架构 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>定位与整体架构</h1>
+<p class="lead">Brush 是一个 Minecraft 26.1.2 的自研模组加载器，目标是「一个加载器 + 一个 mod jar 跑三种运行时」。本页给出定位边界、三运行时对照、分层架构与贯穿全项目的工程纪律；具体机制见<strong>启动管线</strong>与<strong>三运行时与宿主适配</strong>两页。</p>
+
+<h2>Brush 是什么，不是什么</h2>
+
+<p>Brush 是<strong>加载器本体</strong>：自己解析版本元数据、自己装配依赖、用自己的 ClassLoader 加载 Minecraft、自己完成注入与模组加载。它不是 Fabric / NeoForge 的插件或衍生品，也不是 Architectury 那种「多模块编译出多个 jar」的抽象层。</p>
+
+<p>边界一侧是「是」：<span class="badge">加载器</span><span class="badge">注入层</span><span class="badge">派发层</span><span class="badge">模组加载</span><span class="badge">API 层</span>。另一侧是明确不做：</p>
+
+<ul>
+<li>不做服务端运行时。</li>
+<li>不做 GUI 安装器、模组市场、自动更新、跨版本兼容。</li>
+<li>不做同一实例内 Fabric mod 与 Neo mod 并存：不存在两个 loader 平起平坐的并列共存，一个实例只能装一个宿主，真做这件事等于另立一个移植工程。</li>
+<li>不做<strong>任何形式的重映射</strong>：vanilla 侧与 mod 侧都不做。</li>
+</ul>
+
+<div class="note">Brush 的独特价值是 <strong>standalone 运行时（S1）+ 跨平台单 jar 分发</strong>。在宿主下启动、Mixin、冲突检测这些事由宿主提供，因此下面的三运行时定位必须讲清楚，否则叠加模式的价值会被误读为「变薄」。</div>
+
+<h2>三运行时对照</h2>
+
+<table>
+<thead><tr><th>场景</th><th>形态</th><th>目标</th><th>状态</th></tr></thead>
+<tbody>
+<tr><td><strong>S1</strong></td><td>原版 MC + Brush</td><td>加载我们生态的 mod</td><td>已达成</td></tr>
+<tr><td><strong>S2</strong></td><td>Fabric 版 MC + Brush</td><td>Fabric mod 与我们的 mod 同时可用</td><td>已达成</td></tr>
+<tr><td><strong>S3</strong></td><td>NeoForge 版 MC（FML）+ Brush</td><td>Neo mod 与我们的 mod 同时可用</td><td>已达成</td></tr>
+<tr><td>S4</td><td>同一实例内 Fabric mod 与 Neo mod 并存</td><td>—</td><td>明确不做</td></tr>
+</tbody>
+</table>
+
+<p>推进顺序固定为 <strong>S1 → S2 → S3</strong>，顺序不可颠倒：未先在 vanilla 上打通启动与注入，就去做宿主适配，会导致核心与宿主耦合，日后无法独立化。</p>
+
+<h2>分层架构</h2>
+
+<table>
+<thead><tr><th>层</th><th>职责</th><th>位置与关键类</th></tr></thead>
+<tbody>
+<tr><td>启动管线</td><td>manifest → version json → 库与 natives 装配 → assets 下载 → 自研 ClassLoader 加载 MC → 反射调用入口</td><td><code>org.abstruck.brush.launch.**</code>（<code>Brush</code> / <code>BrushClassLoader</code> / <code>LaunchParams</code> / <code>DependencyAssembler</code> / <code>meta.*</code> / <code>deps.*</code> / <code>assets.*</code>）</td></tr>
+<tr><td>注入层</td><td>类加载期在内存中改写字节码；磁盘 jar 一个字节不动</td><td><code>transform.TransformBootstrap</code> / <code>BrushMixinService</code> / <code>BrushGlobalPropertyService</code> / <code>mixin.*</code></td></tr>
+<tr><td>派发层</td><td>每个 vanilla 方法上唯一一条 <code>Dispatcher.fire(...)</code>；监听器运行时增删</td><td><code>transform.Dispatcher</code> / <code>HookEvents</code> / <code>CoreHooks</code></td></tr>
+<tr><td>模组加载</td><td>扫描 <code>brush-mods/</code>、读 <code>brush.mod.json</code>、依赖拓扑排序、实例化入口</td><td><code>mod.*</code>（<code>ModBootstrap</code> / <code>ModResolver</code> / ModClassLoader）</td></tr>
+<tr><td>API 层</td><td>把派发事件包装为语义化、跨运行时一致的 API</td><td><code>org.abstruck.brush.api.**</code></td></tr>
+</tbody>
+</table>
+
+<p>宿主相关代码全部收在 <code>.host</code> 子包（<code>host.fabric.*</code> / <code>host.neoforge.*</code> / <code>host.HostSeams</code>），核心不引用任何 <code>net.fabricmc.*</code> / <code>net.neoforged.*</code> 类型。这一条是 S1 不被宿主污染的机械保证，详见<a href="runtimes.html">三运行时与宿主适配</a>。</p>
+
+<h2>与 Fabric / NeoForge 的关系：叠加，不是寄生</h2>
+
+<p>差别很关键：寄生是我们变成一个普通 mod、永久依赖宿主；<strong>叠加（overlay）是我们作为一层运行在宿主之上，且在 vanilla 上也能独立运行</strong>。</p>
+
+<ul>
+<li><strong>宿主生态的 mod 由宿主自己加载</strong>，我们不需要去兼容它们。因此只剩一件事要解决：保证我们的 mod 与宿主的 mod 在同一 JVM 中共存。</li>
+<li>S2 下 Brush 的 <code>fabric.mod.json</code>、S3 下的 <code>META-INF/neoforge.mods.toml</code> <strong>保留不删</strong> —— Brush 仍显示在宿主的 mod 列表里。</li>
+<li>宿主适配的经验事实：Fabric 与 NeoForge 都把 <code>mixin.service</code> 显式钉死为各自实现，三家共用同一份 sponge-mixin 制品（<code>sponge-mixin 0.17.4 + Mixin 0.8.7</code>）。</li>
+</ul>
+
+<h2>26.1.2 未混淆带来的「无重映射」红利</h2>
+
+<p>26.1 是第一个未混淆版本，且自带参数名。官方名即运行时名，Intermediary / Yarn 在 1.21.11 之后停止更新，Fabric 转向官方名，NeoForge 同样用官方名。三个运行时因此<strong>共用同一套名字</strong>：</p>
+
+<table>
+<thead><tr><th>运行时</th><th>命名空间</th></tr></thead>
+<tbody>
+<tr><td>S1</td><td>官方名</td></tr>
+<tr><td>S2（+Fabric）</td><td>官方名</td></tr>
+<tr><td>S3（+NeoForge）</td><td>官方名</td></tr>
+</tbody>
+</table>
+
+<p>由此不需要实现：vanilla 侧重映射、mod 侧加载期重映射、映射表下载与合成、<code>MappingResolver</code> 式反射名解析、以及 refmap。同一份 <code>brush.mixins.json</code> 在 S1 由我们的 MixinService 应用、在 S2 由 Knot 应用、在 S3 由 FML 应用，<strong>零改动</strong>。</p>
+
+<div class="warn">代码未混淆 ≠ 开源：EULA 未变，仍不可分发 MC 代码。发行包只保留代码与脚本，MC 文件、assets、natives、构建产物一律写入缓存目录并在 <code>.gitignore</code> 排除。</div>
+
+<h2>工程纪律</h2>
+
+<div class="cards">
+<div class="card"><h3>薄注入</h3><p>每个 vanilla 方法上<strong>恰 1 个</strong>注入点，织入<strong>恰 1 条</strong> <code>Dispatcher.fire(...)</code>；vanilla 类结构改动 0、控制流改动 0、磁盘文件改动 0。footprint 不随 hook 数量增长。</p></div>
+<div class="card"><h3>可链式优先</h3><p>禁止 <code>@Overwrite</code> / <code>@Redirect</code> / <code>@ModifyConstant</code> / <code>ci.cancel()</code> / <code>@Unique</code>；需要重写方法逻辑时用 MixinExtras 的 <code>@WrapMethod</code>。</p></div>
+<div class="card"><h3>必须实测</h3><p>任何「支持某生态 / 能跑某 mod」的表述都必须附 mod 名称与版本、运行日志、失败清单；未经实测只能写「未验证」，禁止写「应可运行」。</p></div>
+<div class="card"><h3>改动面台账</h3><p>每次新增注入点都要更新注入面台账，并保持基线 / 台账 / 代码镜像 / mixin 实际指令四面一致。</p></div>
+</div>
+
+<p>最小改动是<strong>最高设计约束</strong>，不是审美偏好：footprint 越小，与宿主及其他 mod 撞车概率越低，S2 / S3 才成立。遇到「改动更少」与「实现更省事」冲突时，一律选前者。另有两条熔断规则：<strong>S1 必须始终可运行</strong>；任何「为了让宿主适配更省事而放宽核心隔离要求」的念头，停下并报告。</p>
+
+<h2>仓库形态</h2>
+
+<p>发行包由<strong>两个各自独立的项目</strong>组成：</p>
+
+<dl class="kv">
+<dt>Brush（加载器本体）</dt>
+<dd>加载器核心 + 4 个宿主 harness/profile 类，另有独立的 <code>bootstrap</code> 自举源集。产出 <code>build/libs/Brush-&lt;version&gt;.jar</code>。</dd>
+<dt>Brush API（能力库 mod）</dt><dd>内容注册 / 网络引擎 / 创造栏 / HUD 与输入 / 屏幕事件 / 键位。以 <code>brush.mod.json</code> 形态的库模组存在，自身可引用宿主类。</dd>
+<dt>两阶段构建</dt><dd>先出加载器 jar，再用它编译库模组；库模组产物的默认位置在兄弟项目 Brush API 的 <code>build/libs/brush-api.jar</code>。</dd>
+<dt>契约 jar（可选）</dt><dd><code>brush-api-contract.jar</code> 只含 <code>org.abstruck.brush.api.**</code>，给「只想用语义 API」的作者做编译期自我约束；库模组产物缺席时它明确跳过并打印原因与出路，<strong>不影响</strong> <code>gradlew build</code>。</dd>
+</dl>
+
+<div class="note">API 层的硬约束：其天花板等于最受约束的平台，<strong>不得暴露只有在 S1 才做得到的能力</strong>，否则「写一次跑三处」是假承诺；语义必须三平台一致；同时必须提供平台特定逃生舱。这条约束直接决定了哪些能力会被否决 —— 例如 Access Widener 因其只能在 S1 生效而被明确不实现。</div>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模组加载 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>模组加载</h1>
+<p class="lead">Brush 的模组加载是"扫描目录 → 解析元数据 → 校验 → 依赖拓扑排序 → 逐 mod 建类加载器 → 实例化入口 → 调 <code>onInitialize()</code>"的一条直线流程，全部由 <code>org.abstruck.brush.mod.ModBootstrap</code> 驱动。本页讲清目录约定、<code>brush.mod.json</code> 字段全表、入口契约与"失败可读"的具体形态；加载器自身也遵循同一套元数据格式。</p>
+
+<h2>目录约定与各运行时的实例目录</h2>
+<p>我们生态的 mod 放在独立的 <code>brush-mods/</code>，<b>不与宿主的 <code>mods/</code> 混放</b>。理由：宿主加载器会扫 <code>mods/</code>，对我们的 mod可能告警；我们也不该误扫宿主的 mod。</p>
+<table>
+<tr><th>项</th><th>约定</th></tr>
+<tr><td>识别对象</td><td>仅 <code>*.jar</code></td></tr>
+<tr><td>扫描顺序</td><td>按文件名<b>字典序</b></td></tr>
+<tr><td>非 jar 项</td><td>打印 <code>skipping non-jar entry</code>，不报错</td></tr>
+<tr><td>目录不存在</td><td>自动创建，报告 <code>0 jar(s)</code> —— 这是<b>合法状态</b>，不是错误</td></tr>
+<tr><td>jar 缺 <code>brush.mod.json</code></td><td><b>报错</b></td></tr>
+</table>
+<table>
+<tr><th>运行时</th><th>实例 mod 目录</th><th>预处理缓存</th></tr>
+<tr><td>S1</td><td><code>&lt;工作目录&gt;/brush-mods/</code></td><td><code>&lt;工作目录&gt;/brush-cache/prepared/</code></td></tr>
+<tr><td>S2（Fabric）</td><td><code>run/fabric/brush-mods/</code></td><td><code>run/fabric/brush-cache/prepared/</code></td></tr>
+<tr><td>S3（NeoForge）</td><td><code>run/neoforge/brush-mods/</code></td><td><code>run/neoforge/brush-cache/prepared/</code></td></tr>
+</table>
+<p class="muted">依据：<code>build.gradle</code> 的 <code>registerBrushRun</code> / <code>registerFabricRun</code> / <code>registerNeoForgeRun</code> 与 <code>ModBootstrap.install</code> 中的 <code>modsDirAbs.resolveSibling("brush-cache")</code>。三个 <code>run*Client</code> 任务在启动前会清空自己实例的 <code>brush-mods/*.jar</code>，因此"干净 S1"是确定态。</p>
+
+<h2><code>brush.mod.json</code> 字段全表</h2>
+<p>元数据文件名是 <code>brush.mod.json</code>（<code>ModBootstrap.METADATA_ENTRY</code>），位于 <b>jar 根目录</b>。未知字段被 Gson 静默忽略。</p>
+<table>
+<tr><th>字段</th><th>必需</th><th>类型 / 语义</th><th>校验与失败档位</th></tr>
+<tr><td><code>id</code></td><td>是</td><td>模组唯一标识</td><td>须匹配 <code>[a-z][a-z0-9_.-]*</code>；本次扫描内唯一</td></tr>
+<tr><td><code>version</code></td><td>是</td><td>点分纯数字版本</td><td>缺 = 失败；格式非法 = 失败</td></tr>
+<tr><td><code>name</code></td><td>否</td><td>展示名</td><td>缺省回退 <code>id</code></td></tr>
+<tr><td><code>description</code></td><td>否</td><td>描述</td><td>仅展示</td></tr>
+<tr><td><code>authors</code></td><td>否</td><td>字符串数组</td><td>仅展示</td></tr>
+<tr><td><code>icon</code></td><td>否</td><td>jar 内条目路径，如 <code>icon.png</code> 或 <code>assets/example/textures/item/ruby.png</code></td><td><b>展示性，不阻断加载</b>：条目缺失 / 是目录 → 加载期 warn，UI 回退 Brush 默认图标</td></tr>
+<tr><td><code>entrypoints.main</code></td><td>是</td><td>类全名数组</td><td>类名结构 + 入口契约</td></tr>
+<tr><td><code>entrypoints.client</code></td><td>否</td><td>类全名数组</td><td>同契约，但实现 <code>BrushClientModInitializer</code>；类<b>不在加载期加载</b>，迟绑定到 <code>client.run</code> 锚点</td></tr>
+<tr><td><code>entrypoints.server</code></td><td>否</td><td>类全名数组</td><td><b>只做类名结构校验</b>：类不加载、方法不派发</td></tr>
+<tr><td><code>entrypoints.test</code></td><td>否</td><td>类全名数组</td><td>类名结构校验在加载期；接口检查（<code>ModClientTest</code>）在 <code>--brush.mod-test</code> 探针实例化时</td></tr>
+<tr><td><code>mixins</code></td><td>否</td><td><b>按运行时分组的对象</b>：键 <code>brush</code> / <code>fabric</code> / <code>neoforge</code>，值 = jar 根下的 mixin 配置资源名数组</td><td><b>功能性，条目缺失即失败</b>；未知键 = 失败；<code>brush</code> 是默认组，<code>fabric</code> / <code>neoforge</code> 缺省时继承它；平铺数组形态已废弃并 fail-fast</td></tr>
+<tr><td><code>depends</code></td><td>否</td><td>对象：mod id → 版本区间</td><td><b>硬失败</b>：目标缺失或版本不满足即中止加载</td></tr>
+<tr><td><code>breaks</code></td><td>否</td><td>同上</td><td><b>硬失败</b>：目标在场且版本落入区间即拒绝加载</td></tr>
+<tr><td><code>conflicts</code></td><td>否</td><td>同上</td><td><b>WARN，不阻断</b></td></tr>
+<tr><td><code>recommends</code></td><td>否</td><td>同上</td><td><b>WARN</b>：缺失或不满足</td></tr>
+<tr><td><code>suggests</code></td><td>否</td><td>同上</td><td><b>纯元数据</b>：加载器不读取、不校验、不告警</td></tr>
+<tr><td><code>provides</code></td><td>否</td><td>别名 id 数组</td><td>格式同 <code>id</code>；不得等于自身 id、不得自重复；跨 mod 冲突由 <code>ModResolver</code> 报硬失败；别名参与拓扑排序</td></tr>
+<tr><td><code>jars</code></td><td>否</td><td>对象数组，沿用 Fabric 形态 <code>[{ "file": "nested/vendor/dep.jar" }]</code></td><td><b>功能性</b>：条目在 mod jar 内不存在 = 加载期可读失败；解出的嵌套 jar 进入该 mod 的类加载范围</td></tr>
+<tr><td><code>testJar</code></td><td>否</td><td>jar 外路径</td><td>空白值 = 失败；缺省合法</td></tr>
+</table>
+<p>依赖声明的取值支持<b>字符串或字符串数组</b>两形态。版本区间语法（<code>VersionRange</code>）：缺省 / 空串 / <code>*</code> 表任意；裸版本串 = 精确相等；<code>&gt;=</code> <code>&gt;</code> <code>&lt;=</code> <code>&lt;</code> <code>=</code>；<code>^</code>与 <code>~</code>；空格分隔 = AND；<code>||</code> 分隔 = OR。两个特殊 id：<code>brush</code> 比对加载器自身元数据的 <code>version</code>，<code>minecraft</code> 比对 version json 的 id。<span class="muted"></span></p>
+
+<h2>加载顺序</h2>
+<ol>
+<li><b>扫描</b>：<code>Files.createDirectories</code> 保证目录存在 → 收集 <code>*.jar</code> → 字典序排序。</li>
+<li><b>解析 + 校验</b>：逐 jar 用 <code>ZipFile</code> 读根条目 <code>brush.mod.json</code> → Gson 解析 → <code>ModBootstrap.validate</code> 结构校验 → 同一次 <code>ZipFile</code> 作用域内做 <code>checkIconEntry</code>（warn）与 <code>checkMixinEntries</code>。</li>
+<li><b>依赖解析</b>：<code>ModResolver.resolve</code> —— id 去重 → 别名登记 → 依赖存在性与版本区间 → <code>breaks</code> / <code>conflicts</code> / <code>recommends</code> → Kahn 拓扑排序。</li>
+<li><b>运行时接面</b>：经 <code>RuntimeBridge</code> 逐个做平台桩预处理（<code>ModJarPreparer</code>）→ 解嵌套 jar（<code>NestedJarExtractor</code>）→ 建该 mod 的 <code>ModClassLoader</code> → <code>exposeModJar</code> 暴露进共享类空间 → 注册当前运行时生效组的 mod mixin 配置。</li>
+<li><b>实例化入口</b>：按拓扑序逐个实例化 <code>entrypoints.main</code> 的类，登记进 <code>loadedMods()</code>。</li>
+<li><b>调 <code>onInitialize()</code></b>：紧跟构造之后，在同一 <code>ModContext</code> 内调用。</li>
+<li><b>报告</b>：打印 <code>order:</code> / 逐条 <code>loaded:</code> / 摘要行与双版本行。client 入口留到 <code>client.run</code> 锚点。</li>
+</ol>
+
+<h2>入口契约</h2>
+<p>三个条件缺一不可，任一不满足都转为可读失败：</p>
+<ul>
+<li><b>public 具体类</b> —— 接口或抽象类被拒绝（<code>must be a concrete class</code>）。</li>
+<li><b>public 无参构造器</b>。</li>
+<li><b>实现对应接口</b> —— <code>entrypoints.main</code> → <code>org.abstruck.brush.api.BrushModInitializer#onInitialize()</code>；<code>client</code> → <code>BrushClientModInitializer#onInitializeClient()</code>；<code>server</code> → <code>BrushDedicatedServerModInitializer</code>。</li>
+</ul>
+<p class="note">初始化期早于 <code>Main.main</code>，<b>不得假定任何游戏状态已就绪</b>，也不得触碰 <code>BuiltInRegistries</code>。这是"注册期"：注册 L2 事件监听器，游戏交互走监听器。</p>
+
+<h2>失败可读：依赖缺失 / 循环 / 版本不符</h2>
+<p>失败语义是 <b>fail-fast + 一次列全</b>：所有问题先汇总成报告块打印，再抛 <code>IOException</code> 中止启动 —— <b>一个 mod 都不实例化</b>，不抛裸异常、不静默跳过。循环依赖给出<b>真实环路径</b>（<code>a -&gt; b -&gt; a</code>），不是笼统"有环"。</p>
+<pre><code>[brush] MOD LOADING FAILED -- 2 problem(s) (&lt;工作目录&gt;\brush-mods, 3 jar(s)):
+[brush]   - bad-nojson.jar: missing brush.mod.json at jar root (only Brush mods belong in brush-mods/; Fabric/NeoForge mods are loaded by their own loader)
+[brush]   - mod 'example' requires 'brush' &gt;=99.0.0, found 26.10.1
+[brush] no mods were instantiated; aborting launch before the game starts
+[brush] FATAL: mod loading failed: 2 problem(s); no mods were instantiated (details in log)</code></pre>
+<p class="muted">上引为实测原样；其中 <code>brush.mod.json</code> 与 mod id 已按现行命名改写。入口类层面的失败另有专句，例如 <code>mod 'x': entry class Foo must declare a public no-arg constructor</code>、<code>... must implement org.abstruck.brush.api.BrushModInitializer (entrypoint interface contract)</code>。</p>
+
+<h2>读 <code>ModBootstrap</code> 的加载报告</h2>
+<pre><code>[brush] --- mod loading (P3) ---
+[brush] mod dir: &lt;工作目录&gt;\brush-mods (0 jar(s))
+[brush] runtime kind: BRUSH (bridge org.abstruck.brush.transform.StandaloneBridge, loader org.abstruck.brush.launch.BrushClassLoader)
+[brush]   order: brush-api -&gt; example
+[brush]   loaded: brush-api 1.0.0 entry=org.abstruck.brush.api.impl.BrushApiMod
+[brush] mod loading complete -- mods: 2 loaded (brush-api 1.0.0, example 1.0.0)
+[brush] (loader version 26.10.1, game version 26.1.2)</code></pre>
+<p>逐行含义：<code>mod dir</code> = 本次扫描的绝对目录与 jar 数；<code>runtime kind</code> = 判定出的运行时与它选中的 <code>RuntimeBridge</code> 及父类加载器；<code>order:</code> = 依赖拓扑序；<code>loaded:</code> = 每个入口一行；<code>mod loading complete</code> = 摘要；最后一行给出加载器版本与游戏版本。零 mod 时摘要为 <code>mods: none found in &lt;dir&gt;</code>。</p>
+
+<h2>加载器自身也是列表里的一个 mod</h2>
+<p>Brush 本体的元数据同样写在 jar 根 <code>brush.mod.json</code>：</p>
+<pre><code>{
+  "id": "brush",
+  "name": "Brush",
+  "version": "${version}",
+  "description": "The Brush mod loader itself",
+  "icon": "assets/brush/textures/gui/icon.png"
+}</code></pre>
+<p>与普通 mod 的两点差异：① <b>不跑</b>结构校验与依赖检查；② <b>不进</b> <code>loadedMods()</code> / 加载报告 / 归账口径。消费者是 <code>ModBootstrap.loaderMetadata()</code>：依赖解析中 <code>brush</code> id 的比对对象、模组列表的自身条目、以及默认图标路径。元数据缺失或畸形时 <code>loaderVersion()</code> 回退 <code>"unknown"</code>。</p>
+
+<h2>已加载 mod 列表在 UI 里的位置</h2>
+<p>标题界面会挂一枚 <b>20×20 的 <code>Mods</code> 图标按钮</b>。点它打开 <code>ui.ModsScreen</code>：卡片网格展示 <b>Brush 自身条目 + <code>ModBootstrap.modEntries()</code></b>，点击卡片原地展开为整行详情条。头部副标题给出 <code>Brush &lt;版本&gt; | Minecraft &lt;版本&gt; | runtime: &lt;vanilla|fabric|neoforge&gt; | N brush mod(s)</code>。界面细节见 <a href="resources.html">资源、数据与界面</a>。</p>
+<p class="muted">本页依据：<code>ModBootstrap</code> / <code>ModMetadata</code> / <code>ModResolver</code> / <code>ModClassLoader</code> / <code>VersionRange</code> 的源码与 javadoc、<code>brush.mod.json</code>，以及实测日志记载。</p>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>启动管线与自举 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>启动管线与自举</h1>
+<p class="lead">Brush 不依赖任何第三方启动器：自己解析 version json、装配库与 natives、下载 assets，再用自研 ClassLoader 在本进程内加载 Minecraft 并反射调用入口。本页讲清全流程、五个自举/构建命令各自做什么、以及「没有 vanilla jar 也能先自举」的结构原因。</p>
+
+<h2>全流程一览</h2>
+
+<ol>
+<li><strong>版本元数据</strong>：GET version manifest → 在版本条目中按 id 找到目标 → 用该条目给出的 <code>url</code> + <code>sha1</code> 拉取 version json → 解析 <code>libraries</code>（<code>name</code> / <code>rules</code> / <code>natives</code> / <code>extract.exclude</code>）、<code>assetIndex</code>、<code>arguments.game</code>、<code>arguments.jvm</code>、<code>arguments.default-user-jvm</code>。</li>
+<li><strong>依赖装配</strong>：按 <code>rules</code> 过滤 → classifier 修正（x64）→ 按 version json 给定的 URL 下载全部适用库→ 解压 natives。</li>
+<li><strong>assets 装配</strong>：独立步骤，索引 + 全部对象，内容寻址布局。</li>
+<li><strong>启动</strong>：校验本地 client jar → 装配参数 → 构造 <code>BrushClassLoader</code> → 注册注入管线 → 最早锚点统一引导→ 反射调用入口类。</li>
+</ol>
+
+<div class="note">全流程<strong>唯一硬编码 URL</strong>是 manifest 入口 <code>https://piston-meta.mojang.com/mc/game/version_manifest_v2.json</code> —— 它是信任根、无上游可提供；version json 与库的 URL 一律取自元数据。26.1.2 起链条中<strong>已无 remap 步骤</strong>。</div>
+
+<h2>版本元数据解析</h2>
+
+<table>
+<thead><tr><th>项</th><th>26.1.2 实测值</th></tr></thead>
+<tbody>
+<tr><td>manifest</td><td>918 个版本条目</td></tr>
+<tr><td>version json</td><td>42,491 字节，<code>sha1=78941de7…</code></td></tr>
+<tr><td><code>javaVersion</code></td><td><code>majorVersion=25</code></td></tr>
+<tr><td><code>mainClass</code></td><td><code>net.minecraft.client.main.Main</code></td></tr>
+<tr><td><code>libraries</code></td><td>107 条；windows/x86_64 适用 75 条；57 条带 rules</td></tr>
+<tr><td><code>assetIndex</code></td><td>id <code>30</code>，<code>totalSize=456,724,711</code></td></tr>
+<tr><td><code>arguments</code></td><td>game 26 / jvm 13 / default-user-jvm 3</td></tr>
+<tr><td><code>downloads.client</code></td><td>size 38,113,927，<code>sha1=4e618f09…</code></td></tr>
+</tbody>
+</table>
+
+<p>两处与旧版本不同的形态值得记住：<code>client_mappings</code> / <code>server_mappings</code> <strong>不存在</strong>，这是未混淆版本的预期现象，不是缺失，不排查、不报错；<code>arguments.default-user-jvm</code> 与规则条件 <code>os.versionRange</code> 是 26.1.2 新增，前者本装载器按「审计打印 + 不套用」处理。</p>
+
+<h2>依赖装配的关键决策</h2>
+
+<div class="cards">
+<div class="card"><h3>必须在 rules 之外再按 classifier 筛一次</h3><p>26.1.2 的库 <code>rules</code> 只写 <code>os.name=windows</code>，x64 / x86 / arm64 三变体<strong>全部通过过滤</strong>。因此按名称第 4 段再筛：保留无 classifier 或 <code>natives-windows</code>，剔除 16 条 <code>natives-windows-x86</code> / <code>-arm64</code>，每条都打印登记。</p></div>
+<div class="card"><h3>URL 一律取元数据，不拼主机名</h3><p>26.1.2 实测：59 个保留库的 URL 主机全部是 <code>libraries.minecraft.net</code>，而 client jar 来自 <code>piston-data.mojang.com</code> ——「拼主机名」是错误做法。</p></div>
+<div class="card"><h3>natives 解压 + 保留 jar 在 classpath</h3><p>默认排除前缀 <code>META-INF/</code>；实测排除的 38 个条目全部是 <code>META-INF/*</code>，<strong>无任何 DLL 被排除</strong>，最终写入 10 个条目 = 9 个 DLL + 1 个许可文件。</p></div>
+<div class="card"><h3>LWJGL 从 jar 内自行提取</h3><p>native jar 内载荷位于嵌套路径 <code>windows/x64/org/lwjgl/&lt;模块&gt;/&lt;name&gt;.dll</code>；version json 的 <code>-Dorg.lwjgl.system.SharedLibraryExtractPath</code> 表明运行期提取是主路径，因此 natives jar <strong>必须留在 classpath 上</strong>。</p></div>
+</div>
+
+<h2>启动流程（<code>Brush.run</code>）</h2>
+
+<p>实际执行序：</p>
+
+<ol>
+<li>读 version json；校验 Java 版本 ≥ <code>javaVersion.majorVersion</code>。</li>
+<li>校验本地 client jar 存在且 sha1 / size 与 <code>downloads.client</code> 一致 —— 不一致即<strong>拒绝启动</strong>；vanilla 磁盘文件只读。</li>
+<li>库装配；按 <code>logging.client.file</code> 的实测 <code>argument</code> 模板设置 log4j 系统属性，形态不符即报错、不猜。</li>
+<li><code>arguments.jvm</code> / <code>arguments.default-user-jvm</code> / <code>arguments.game</code> 分别处理：可用的 <code>-D</code> 经 <code>System.setProperty</code> 在类加载前设置；game 参数经 rules 过滤 + 占位符替换。</li>
+<li>构造 <code>BrushClassLoader</code>，设为主线程 ContextClassLoader，并校验入口类条目存在于 classpath。</li>
+<li>注册注入管线，随后执行最早锚点统一引导。</li>
+<li>反射调用入口类的 <code>main(String[])</code>；返回后 <code>System.exit(code)</code>，避免残留线程拖住 JVM。</li>
+</ol>
+
+<p><code>BrushClassLoader</code> 的四条设计约束：parent 为平台类加载器、<code>registerAsParallelCapable()</code>、可插入 <code>ClassTransformer</code> 链、逐类日志见证。</p>
+
+<div class="note">为什么是<strong>进程内</strong>启动而不是 spawn 子 JVM：注入层要求「在类首次加载前完成注入」，这只有由我们的 ClassLoader 亲自加载 MC 类才能做到。代价如实登记：<code>-cp</code> 不设置；纯 JVM 旗标进程内无法在运行中追加，日志打印 skipped —— 26.1.2 新增的 <code>--sun-misc-unsafe-memory-access=allow</code> 与 <code>--enable-native-access=ALL-UNNAMED</code> 已在 <code>runClient</code> 任务的 <code>jvmArgs</code> 中直传本 JVM。</div>
+
+<h2>五个自举 / 构建命令</h2>
+
+<table>
+<thead><tr><th>命令</th><th>做什么</th><th>幂等与校验</th></tr></thead>
+<tbody>
+<tr><td><code>gradlew.bat metadata</code></td><td>拉 manifest → version json；客户端 jar 缺失则下载，存在则交叉核验（sha1 + size）</td><td>缓存命中即跳过；校验失败即报错停止</td></tr>
+<tr><td><code>gradlew.bat libraries</code></td><td>下载全部 applicable 库并解压到 <code>cache/natives/</code>；<code>dependsOn metadata</code></td><td>逐件 sha1 / size 校验；已就位即命中缓存</td></tr>
+<tr><td><code>gradlew.bat assets</code></td><td>下载 asset index 与全部对象到 <code>cache/assets</code>；<code>dependsOn metadata</code></td><td>内容寻址，已存在的对象跳过</td></tr>
+<tr><td><code>gradlew.bat bootstrap</code></td><td><strong>可选的一次性备齐</strong>：<code>metadata</code> + <code>libraries</code> + <code>assets</code> —— <strong>构建已自动做 <code>metadata</code></strong>，这一步是为了连 assets 一起备好、省掉首次运行时的等待</td><td>三个子任务全部幂等，可重复执行</td></tr>
+<tr><td><code>gradlew.bat installNeoForge</code></td><td>下载官方 NeoForge 安装器并安装到缓存；<strong>只装不启动</strong></td><td>装完即退出；三类完成判据齐全即跳过安装器</td></tr>
+</tbody>
+</table>
+
+<div class="ok">为什么自举能先于编译跑：P1 启动器侧<strong>不引用 MC 类型</strong>，已被拆成独立的 <code>bootstrap</code> 源集 —— 下载任务只需要 JDK + gson/log4j。这解掉了「没有 jar ⇒ 编译不过 ⇒ 下不了 jar」的死锁。<strong>2026-10-16 起 <code>metadata</code> 由构建自动触发</strong>，<strong>所以这个死锁连「手动第一步」都不再需要</strong> —— <code>bootstrap</code> 只剩「连 assets 一起备好」这种锦上添花的作用。想关掉自动自举传 <code>-Pbrush.autoBootstrap=false</code>，那时缺件仍<b>可读失败</b>、不会静默跳过。</div>
+
+<div class="note"><strong>前置：构建 JDK 不写死路径</strong>。各 <code>gradle.properties</code> 里已<strong>删除</strong>写死的 <code>org.gradle.java.home=&lt;本机 JDK 路径&gt;</code>，改为 <code>org.gradle.java.installations.fromEnv=JDK25_HOME</code> —— <strong>只写环境变量名、不含任何绝对路径</strong>；各 <code>settings.gradle</code> 挂了 <code>pluginManagement</code>与 <code>org.gradle.toolchains.foojay-resolver-convention</code> <code>0.7.0</code>，<code>build.gradle</code> 的 <code>java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }</code> 不变 ⇒ <strong>本机没有 JDK 25 时 Gradle 会自动把它下到 Gradle 缓存</strong>。JDK 装在 Gradle 不自动扫描的位置时：设环境变量 <code>JDK25_HOME</code> 指向它；临时指定用 <code>-Dorg.gradle.java.home=&lt;JDK 25 路径&gt;</code>。四处项目 <code>gradlew help</code> 实测全部 BUILD SUCCESSFUL（10–17 s）；本机实测时用 <code>-Dorg.gradle.java.home=…</code> 显式指定，而仓库里已无任何绝对路径。</div>
+
+<div class="note"><strong>IDEA 用户的连带提示</strong>：打开项目时 IDE 可能报「找到无效的 Gradle JDK 配置 / Invalid Gradle JDK configuration」。原因：IDEA 的 Gradle JDK 原先是特殊值 <code>#GRADLE_JAVA_HOME</code>，而那一行已按上面的修订删除 ⇒ 这个引用悬空了。<strong>这是 IDE 侧设置，与仓库 / 构建无关</strong> —— 命令行 <code>gradlew</code> 走 toolchain，完全不受影响。两个做法任选：① 在 <code>Settings → Build, Execution, Deployment → Build Tools → Gradle → Gradle JDK</code> 里显式选中本机的 JDK 25；② 把 <code>.idea/gradle.xml</code> 的 <code>gradleJvm</code> 改成具体的 JDK 名。改完需要 <strong>Reload Gradle Project</strong>才生效。另：本机已设环境变量 <code>JDK25_HOME</code> 指向本机 JDK 25，因此命令行侧四个项目只靠该变量即可构建成功，且 Gradle 自己的 <code>jdks</code> 缓存目录下<strong>没有下载任何 JDK</strong>。</div>
+
+<p>实测规模：assets 4750 个对象 / 457.7 MB + 库 59 个 / 65.1 MB + natives 10 个 + 客户端 jar 38.1 MB，整条约 2 分 26 秒，assets 最耗时。只跑 S1 的话，<code>installNeoForge</code> 可以跳过 —— 它只在编译 Brush API 或跑宿主运行时才需要。</p>
+
+<h2>离线、续跑与断点语义</h2>
+
+<ul>
+<li><strong>下载先写临时文件</strong>（<code>.part</code>），sha1 / size 校验通过后才落盘。</li>
+<li><strong>有界重试</strong>：单次 fetch 最多 3 次尝试，退避 1 秒 × 尝试次数；超过即抛异常，绝不吞错。</li>
+<li><strong>可续跑</strong>：再次执行同一命令时，已就位且校验通过的文件被跳过，只补缺的 —— 中断后重跑即可继续，不需要清目录。assets 因为内容寻址，天然如此。</li>
+<li><strong>强制刷新</strong>：三个入口程序各自支持 <code>--refresh</code> 参数。发行版的 Gradle 任务<strong>未</strong>透传该参数，因此 <code>gradlew.bat metadata --refresh</code> 这种写法在本发行版下<strong>未验证</strong>。</li>
+<li><strong>离线首装</strong>：<code>-Pbrush.neoforgeInstaller=&lt;path&gt;</code> 给本机 NeoForge 安装器副本时直接用本机文件，装不上时不再只能干等超时；不传则从 <code>maven.neoforged.net</code> 下载，sha1 仍校验。</li>
+</ul>
+
+<h2>属性覆盖表</h2>
+
+<dl class="kv">
+<dt><code>-Pbrush.vanillaJar=</code></dt><dd>vanilla 26.1.2 客户端 jar。默认 <code>&lt;gradle 用户目录&gt;/caches/brush/&lt;mcVersion&gt;/&lt;mcVersion&gt;.jar</code> —— <strong>用户级 Gradle 缓存，不在项目根</strong>，多项目共享同一份。</dd>
+<dt><code>-Pbrush.cache=</code></dt><dd>MC 缓存目录。默认 <code>&lt;gradle 用户目录&gt;/caches/brush/cache/</code> —— 同上，跨项目共享；传本属性可覆盖到任意位置。</dd>
+<dt><code>-Pbrush.neoforgeInstaller=</code></dt><dd>本机 NeoForge 安装器 jar，用于离线首装。默认无。</dd>
+<dt><code>-PbrushApiJar=</code></dt><dd>库模组 jar，<strong>仅可选的契约 jar 需要</strong>。默认按查找顺序：本项目的 <code>libs\brush-api.jar</code> → 兄弟项目 Brush API 的 <code>build\libs\brush-api.jar</code>。</dd>
+</dl>
+
+<h2>启动日志怎么读</h2>
+
+<p>加载器侧日志每行以 <code>[brush]</code> 为前缀。典型开场：</p>
+
+<pre><code>[brush] === Brush launch (P1.5 + P2.2 injection) ===
+[brush] version=26.1.2, cache=…, game-dir=…
+[brush] client jar verified: …\26.1.2.jar
+[brush]   sha1=4e618f09a0c649dde3fdf829df443ce0b8831e65 size=38113927
+[brush] libraries: 59 jars, natives dir: …\cache\natives\26.1.2
+[brush]   skipped: -cp (classpath is held by BrushClassLoader)
+[brush] default-user-jvm: 2/3 group(s) apply (os.versionRange evaluated against 10.0.26200)
+[brush] BrushClassLoader active: parent=platform, classpath entries=69 (game libs + MC + 9 injection-stack entries)
+[brush] injection pipeline registered as BrushClassLoader transformer #1
+[brush] BrushClassLoader defines net.minecraft.client.main.Main   &lt;-- entry class  [main]</code></pre>
+
+<table>
+<thead><tr><th>日志行</th><th>含义 / 判据</th></tr></thead>
+<tbody>
+<tr><td><code>client jar verified</code></td><td>本地 vanilla 本体的 sha1 / size 与 <code>downloads.client</code> 一致；不一致不会走到这里</td></tr>
+<tr><td><code>libraries: N jars, natives dir</code></td><td>库装配结果的 classpath 条数与 natives 目录</td></tr>
+<tr><td><code>skipped: -cp</code> / <code>skipped: &lt;flag&gt;</code></td><td>进程内形态的如实登记，不是错误</td></tr>
+<tr><td><code>default-user-jvm: k/n group(s) apply</code></td><td>仅审计打印；<code>os.versionRange</code> 的取值串同时输出</td></tr>
+<tr><td><code>BrushClassLoader defines &lt;入口类&gt;</code></td><td><strong>启动路径经过我们的 ClassLoader 的直接证据</strong></td></tr>
+<tr><td>游戏侧 <code>injection points: N, injected vanilla classes: M</code></td><td>注入面计数，应与注入面台账一致</td></tr>
+<tr><td>游戏侧 <code>hook fired: &lt;事件&gt;</code></td><td>派发链触发的见证行</td></tr>
+</tbody>
+</table>
+
+<div class="ok">验收结论：全部纹理图集 <code>Created</code>、tick 稳定到 1000+/2000+，即已进入主菜单；全量日志中 <code>[brush]</code> 前缀的 FATAL / ERROR = 0。起始的少量 401 / Realms 报错是离线会话（<code>--accessToken 0</code>）下 vanilla 自身的必然行为。</div>
+
+<h2>开发形态的如实边界</h2>
+
+<ul>
+<li><strong>离线身份固定</strong>为用户名 <code>Dev</code> + 固定 UUID + <code>userType=msa</code>、accessToken <code>0</code>：可复现，但服务端鉴权必然失败，只能停留在离线模式。</li>
+<li><strong>入口类全名取自 version json</strong>，不硬编码；26.1.2 未混淆，<code>net.minecraft.client.main.Main</code> 即运行时名，无任何映射环节。</li>
+<li><strong>未做</strong>：多实例隔离、崩溃自动诊断、启动性能优化。</li>
+</ul>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

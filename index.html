@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Brush Wiki · Minecraft 26.1.2 自研模组加载器</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-root="">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+
+<h1>Brush Wiki</h1>
+
+<p class="lead">
+Brush 是一个自研的 Minecraft <strong>26.1.2</strong> 客户端模组加载器。它的核心卖点是
+<strong>「写一次，一个 jar 跑三种运行时」</strong> —— S1 纯 Brush、
+S2 Fabric 宿主、S3 NeoForge 宿主。26.1 起游戏未混淆，三个运行时的类名与方法名完全一致，
+因此不需要任何重映射、也不需要为平台分别构建。
+</p>
+
+<div class="note">
+<strong>下载 MDK（26.10.1）</strong>：<a href="Brush-MDK-26.10.1.zip">Brush-MDK-26.10.1.zip</a>（约 66 KB）——
+解压后<strong>项目根就是可运行的 Gradle 工程</strong>，
+加载器与能力库默认从网络库取。上手步骤见下方
+<a href="#quickstart">「快速开始（MDK）」</a>，完整接线与模板见
+<a href="api/first-mod.html">第一个 mod（MDK 上手）</a>。
+</div>
+
+<div class="cards">
+  <div class="card">
+    <h3>第一部分 · Brush（加载器）</h3>
+    <p>启动管线与自举、注入层、派发与事件、模组加载、三运行时与宿主适配、资源与数据、
+       构建产物与命令、最小改动原则与禁止清单、测试矩阵与诊断、常见问题 —— 共 11 页。</p>
+    <p><a href="brush/overview.html">从「定位与整体架构」开始 →</a></p>
+  </div>
+  <div class="card">
+    <h3>第二部分 · Brush API（能力库）</h3>
+    <p>契约面与设计原则、第一个 mod、内容注册、网络、界面与输入、数据与资源、
+       事件总表、平台适配与自检、API 参考索引 —— 共 9 页。</p>
+    <p><a href="api/overview.html">从「契约面与设计原则」开始 →</a></p>
+  </div>
+</div>
+
+<h2>三种运行时</h2>
+
+<table>
+<tr><th>运行时</th><th>形态</th><th>启动</th><th>生态共存</th></tr>
+<tr>
+  <td><span class="badge">S1</span>纯 Brush</td>
+  <td>vanilla + Brush 自己的 ClassLoader 与注入层</td>
+  <td><code>gradlew runClient</code></td>
+  <td>只加载 Brush 生态的 mod</td>
+</tr>
+<tr>
+  <td><span class="badge">S2</span>Fabric 宿主</td>
+  <td>Fabric Loader（Knot）之上叠加 Brush</td>
+  <td><code>gradlew runFabricClient</code></td>
+  <td>Fabric mod 与 Brush mod 同一 JVM 共存</td>
+</tr>
+<tr>
+  <td><span class="badge">S3</span>NeoForge 宿主</td>
+  <td>FML / NeoForge 之上叠加 Brush</td>
+  <td><code>gradlew runNeoForgeClient</code></td>
+  <td>Neo mod 与 Brush mod 同一 JVM 共存</td>
+</tr>
+</table>
+
+<div class="note">
+<strong>叠加（overlay）而非寄生。</strong>Brush 不把自己变成某个宿主的普通 mod 而永久依赖它：
+同一份字节码在 vanilla 上也能独立跑起来（S1）。这是 <code>HostAdapter</code> 抽象与「薄注入」设计的直接结果，
+详见 <a href="brush/runtimes.html">三运行时与宿主适配</a>。
+</div>
+
+<h2 id="quickstart">快速开始（MDK）</h2>
+
+<p>开发包（MDK）是<strong>一个扁平的 Gradle 项目</strong>：解开压缩包后 <code>build.gradle</code> / <code>src/</code> / wrapper 都在<strong>根目录</strong>。它<strong>默认从网络库取加载器与能力库</strong>；命令都在项目根执行：</p>
+
+<pre><code>gradlew.bat jar            :: 编译你的 mod（构建期自动下 MC 客户端 jar；产物 build\libs\mdkexample.jar）
+gradlew.bat runClient      :: 启动游戏（S1）：先摆好"你的 mod + brush-api"，再拉起游戏
+gradlew.bat bootstrap      :: 可选：一次性备齐客户端 jar + 库 + natives + assets</code></pre>
+
+<p class="muted">MDK 现在<strong>三种运行时都能直接跑</strong>：<code>runClient</code>（S1）/ <code>runFabricClient</code>（S2）/ <code>runNeoForgeClient</code>，harness 来自那个 <code>tools</code> classifier。
+离线或想完全自包含就传 <code>-Pbrush.useLocalJars=true</code> —— 那时改用你自己放进 <code>libs/</code> 的 jar。
+细节见 <a href="api/first-mod.html">第一个 mod（MDK 上手）</a>。</p>
+
+<h2>按角色阅读</h2>
+
+<dl class="kv">
+  <dt>mod 作者</dt>
+  <dd><a href="api/overview.html">Brush API 总览</a> → <a href="api/first-mod.html">第一个 mod</a> →
+      <a href="api/content.html">内容注册</a> → <a href="api/events.html">事件总表</a></dd>
+  <dt>加载器贡献者</dt>
+  <dd><a href="brush/overview.html">整体架构</a> → <a href="brush/startup.html">启动管线</a> →
+      <a href="brush/injection.html">注入层</a> → <a href="brush/dispatch.html">派发层</a> →
+      <a href="brush/limits.html">最小改动原则</a></dd>
+  <dt>排障</dt>
+  <dd><a href="brush/diagnostics.html">测试矩阵与诊断</a> → <a href="brush/faq.html">常见问题</a></dd>
+  <dt>只想跑起来</dt>
+  <dd><a href="brush/build.html">构建、产物与命令</a></dd>
+</dl>
+
+<h2>本 Wiki 的事实来源</h2>
+
+<ul>
+  <li><strong>源码</strong>：加载器与能力库的实际代码 —— 类与方法的注释是签名与语义的权威依据。</li>
+  <li><strong>实测证据</strong>：三运行时启动日志、自检报告、注入面台账与构建输出。本站只写有这些支撑的结论。</li>
+</ul>
+
+<p class="muted">本站是<strong>离线自包含</strong>站点：不引用站点之外的文件，也不加载任何外部资源。</p>
+
+<div class="warn">
+<strong>关于「未验证」</strong>：本 Wiki 只写有源码或实测日志支撑的结论。凡属推测、未实测或依赖他人环境的判断，
+一律显式标注「未验证」—— 这与项目本身「不许假绿」的纪律一致。
+</div>
+
+<footer>
+Brush Wiki · 版本 26.10.1 / 目标 MC 26.1.2 / Java 25 / Gradle 9.8.1 · 内容截至 2026-10-16 ·
+本页为站点入口
+</footer>
+
+</main>
+</div>
+<script src="assets/nav.js"></script>
+</body>
+</html>

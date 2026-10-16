@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>测试矩阵与诊断 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>测试矩阵与诊断</h1>
+<p class="lead">Brush 的验收由四道门禁组成：T1–T3 是三场自检，T4 是不启动游戏的静态台账闸门。本页说明每道门禁测什么、在 Windows 上怎么做到可自动化、实机探针覆盖哪些"必须真进世界"的行为，以及出问题时用哪些现有工具归因。发布版不含测试装置，见末节。</p>
+
+<h2>1. 四道门禁（T1–T4）</h2>
+
+<table>
+<tr><th>编号</th><th>场景</th><th>任务</th><th>断言通道</th><th>测什么</th></tr>
+<tr>
+  <td><span class="badge">T1</span></td>
+  <td>S1 冒烟：vanilla + Brush + 示例 mod</td>
+  <td><code>runSelftest</code></td><td>退出码</td>
+  <td>hook 全命中、无注入失败</td>
+</tr>
+<tr>
+  <td><span class="badge">T2</span></td>
+  <td>S2：Fabric Loader + Fabric API + 真实 Fabric mod</td>
+  <td><code>runFabricSelftest</code></td><td>退出码</td>
+  <td>T1 全部 + Fabric mod 出现在已加载列表 + 无 Mixin 冲突日志</td>
+</tr>
+<tr>
+  <td><span class="badge">T3</span></td>
+  <td>S3：NeoForge + 真实 Neo mod</td>
+  <td><code>runNeoForgeSelftest</code></td><td>退出码</td>
+  <td>T1 全部 + Neo mod 出现在已加载列表 + 无 Mixin 冲突日志</td>
+</tr>
+<tr>
+  <td><span class="badge">T4</span></td>
+  <td>footprint 回归</td>
+  <td><code>footprintCheck</code></td><td>进程退出码</td>
+  <td>基线 / 注入面台账 / 代码镜像 / 真实注入指令四面一致；注入面变更必须显式登记</td>
+</tr>
+</table>
+
+<p>自检模式由启动参数 <code>--brush.selftest</code> 打开：跑到预定生命周期点后打印结构化报告并主动 <code>System.exit(退出码)</code>，不等用户操作。退出码即断言通道 —— JavaExec 退出码非 0 直接令构建失败，无需额外判定代码。</p>
+
+<h2>2. 退出码位（断言通道的编码）</h2>
+
+<table>
+<tr><th>位序（值）</th><th>含义</th><th>状态</th></tr>
+<tr><td>—（0）</td><td>全部通过</td><td>—</td></tr>
+<tr><td>0（1）</td><td>通用失败</td><td>在用</td></tr>
+<tr><td>1（2）</td><td>注入审计失败</td><td>在用</td></tr>
+<tr><td>2（4）</td><td>overwrite 告警</td><td><strong>已撤销</strong>，槽位不再分配</td></tr>
+<tr><td>3（8）</td><td>宿主 / 模式守卫（S2/S3）</td><td>在用</td></tr>
+<tr><td>4（16）</td><td>内容注册归账审计失败</td><td>在用</td></tr>
+<tr><td>5（32）</td><td>资源审计失败</td><td>在用</td></tr>
+<tr><td>6（64）</td><td>入口审计失败</td><td>在用</td></tr>
+<tr><td>7（128）</td><td>TAB 审计失败</td><td>在用</td></tr>
+<tr><td>8（256）</td><td>mod 自报自检失败</td><td>在用</td></tr>
+<tr><td>16（65536）</td><td>mod 实机测试项失败（<code>EXIT_MOD_TEST</code>）</td><td>在用</td></tr>
+</table>
+
+<p class="note">按位或组合。记号约定：位序 n 的值为 2 的 n 次幂；早期资料里"退出码位 4"曾指值 4，引用时带上括号里的值即可消歧。</p>
+
+<h2>3. Windows 上如何做到可自动化</h2>
+
+<p>关键手段是<strong>把退出点选址在渲染之前</strong>：退出点 = <strong>首个 <code>client.tick</code></strong>。此时五个 hook（<code>bootstrap.early</code> / <code>registries.bootstrap</code> / <code>packs.registered</code> / <code>client.run</code> / <code>client.tick</code>）均已真实触发 ≥1 次，且位于纹理图集烘焙与首帧渲染之前。</p>
+
+<div class="warn">
+<strong>如实边界：</strong>GL 上下文与窗口由 <code>Minecraft</code> <strong>构造器</strong>创建，早于任何 hook 锚点 —— 自检做不到"GPU 初始化之前"。因此纯 headless 的 CI 不可行；本机有显示环境时 T1 全自动可行，窗口短暂闪出即自动退出。Fabric 官方那套 headless 客户端测试依赖 Linux 的 XVFB，Windows 上没有对应机制。
+</div>
+
+<p><strong>不降严格度</strong>：注入点未命中由 <code>require=1</code> 在类加载期直接中止启动；派发链断裂由审计位捕获；期望集为空 = 失败；游戏若在退出点前正常返回，app 侧打印 <code>selftest was armed but the game returned before its exit point</code> 并返回 1。真实渲染与实际游玩行为一律标注"需人工确认"，禁止用"跳过该断言"冒充通过。</p>
+
+<h2>4. 实机探针测什么</h2>
+
+<p>自检退出点在世界加载之前，覆盖不到"进世界之后"。实机探针（<code>runRealityProbe</code> / <code>runFabricRealityProbe</code> / <code>runNeoForgeRealityProbe</code>）真进世界后逐项断言；宿主形态由 harness 的 <code>--reality</code> 通路 + 预置世界打通。</p>
+
+<table>
+<tr><th>相位</th><th>测什么</th><th>实测判据（日志原文摘录）</th></tr>
+<tr>
+  <td>网络：恰好一次 + 主线程</td>
+  <td>服务端钩子生效；客户端<strong>恰好一次</strong>；投递在<strong>主线程</strong></td>
+  <td><code>roundTrip: server.pings=1, client.pongs=1 (expected 1/1), mainThread=yes -- result=ok</code></td>
+</tr>
+<tr>
+  <td>HUD 像素</td>
+  <td>监听器每渲染帧在 GUI <code>(6,6)</code> 画 8x8 洋红标记，再截屏读像素</td>
+  <td><code>hud: frames=1291, pixels((12,12)=FFFF00FF …)</code>；四角像素全中，画面中心是世界天空色</td>
+</tr>
+<tr>
+  <td>输入事件</td>
+  <td>PowerShell 驱动向游戏窗口 PostMessage 一条 OS 级 <code>WM_KEYDOWN('B')</code>，经 GLFW 到达 <code>KeyboardHandler#keyPress</code> 的 HEAD 注入点</td>
+  <td><code>key=B(66), action=PRESS, scancode=48</code></td>
+</tr>
+<tr>
+  <td>方块放置</td>
+  <td>服务端线程 <code>setBlockAndUpdate</code>→ 客户端读回 → 60 tick 渲染停留</td>
+  <td><code>block-place: … changed=true … client read-back=example:ruby_block (block_update encoded + delivered) -- result=ok (render dwell 60 ticks completed, no crash)</code></td>
+</tr>
+<tr>
+  <td>mod 自带 mixin 的行为</td>
+  <td>在服务端线程驱动 <code>ServerPlayerGameMode#destroyBlock</code> 做差分测试：普通方块须能破坏、基岩须被拒且保持、包装器自记账计数器须按预期增长</td>
+  <td><code>mod-mixin: block-guard WRAP_HITS +2, PROTECTED_HITS +1, normal.destroyed=true, bedrock.destroyed=false, bedrock.intact=true -- result=ok</code></td>
+</tr>
+<tr>
+  <td>数据锚点</td>
+  <td>入世界后 <code>data.loaded</code> 命中、<code>/reload</code> 后 <code>data.reload</code> 命中且视图不掉</td>
+  <td><code>data.loaded: fired=yes, view=1 registries / 2 entries […] -- result=ok</code></td>
+</tr>
+</table>
+
+<p><strong>断言本身也被验证过</strong>：临时短路去重后复跑，探针如期把构建打红（<code>client payload delivered 2 time(s), expected exactly 1</code>，<code>exit.code=4</code>），随后恢复并复跑 PASS。</p>
+
+<p class="muted">保留的人工边界：像素级观感与操作手感仍是人眼项；26.1.2 集成服务器的传输层是内存通道，socket 级与专有服务器往返不在范围。</p>
+
+<h2>5. compatTest 系列与归档产物目录</h2>
+
+<p>聚合入口有三个：<code>compatTestFabric</code>（T2）、<code>compatTestNeoForge</code>（T3）、<code>compatTest</code>。</p>
+
+<ul>
+  <li><code>footprintCheck</code> 以 <code>mustRunAfter</code> 排在三场 run 之后：同图执行时最后跑，防止 fail-fast 在首个 run 失败时提前掐掉后续归档。</li>
+  <li>三场 run 按<strong>任务名字母序</strong>执行（<code>runFabricSelftest</code> → <code>runNeoForgeSelftest</code> → <code>runSelftest</code>）；fail-fast 会让靠后的 run 不执行，排障时以日志里的 <code>&gt; Task :run…</code> 行为准，不要假定 T1 先跑。</li>
+</ul>
+
+<table>
+<tr><th>归档文件（<code>run/compat-test/</code>）</th><th>内容</th><th>机制</th></tr>
+<tr>
+  <td><code>t1|t2|t3-console.log</code></td>
+  <td><strong>控制台双通道合一</strong>：装配器 + 子 JVM 游戏侧，按发生顺序</td>
+  <td>tee 流同写控制台与归档文件</td>
+</tr>
+<tr>
+  <td><code>t1|t2|t3-latest.log</code></td>
+  <td>游戏侧 <code>latest.log</code> 的字节级快照</td>
+  <td>归档任务经 <code>finalizedBy</code> 挂在对应 run 之后 —— <strong>run 失败也照常归档</strong></td>
+</tr>
+</table>
+
+<p><code>run/</code> 不进版本库（.gitignore）。实测结论台账里每条结论都附真实日志路径与关键行，其中"现行门禁态"一节只写截至最后一次运行的事实值、每轮刷新。归档是覆盖式快照，历史轮现场不随文件保留 —— 修复史以文档与源码 javadoc 为完整档。</p>
+
+<h2>6. footprint 台账的"四面一致"</h2>
+
+<p>T4 是<strong>跨来源</strong>的四面核对：<strong>点数求和、被注入类名取并集</strong>。四面全部一致才 PASS。</p>
+
+<table>
+<tr><th>面</th><th>来源</th><th>捕获的漂移</th></tr>
+<tr><td>基线</td><td><code>FootprintCheck</code> 的 <code>BASELINE_POINTS</code> / <code>BASELINE_CLASSES</code></td><td>代码镜像改了但基线未同步</td></tr>
+<tr><td>注入面台账</td><td>台账的摘要行 + 表行 / 去重类数</td><td>文档、摘要、代码三者不一致</td></tr>
+<tr><td>代码镜像</td><td><code>InjectionLedger</code></td><td>镜像与基线 / 台账漂移</td></tr>
+<tr><td>真实注入指令</td><td>ASM 读 mixin 配置列出的 mixin 类：注入器注解方法数 + <strong>注入器承载类</strong>的 <code>@Mixin</code> 去重 targets</td><td><strong>"加了 <code>@Inject</code> 但没登记台账"</strong>这类漏改</td></tr>
+</table>
+
+<ul>
+  <li>第 4 面用 ASM 而非反射：<code>@Mixin</code> 是 CLASS 保留，运行期反射看不见。</li>
+  <li><strong>不解析运行日志</strong>：过期档案会假绿 / 假红；运行态数字由三场自检报告各自呈现。</li>
+  <li>挂进 <code>check</code>：<code>gradlew build</code> 自动跑，也是 <code>compatTest</code> 的 T4 环节。</li>
+</ul>
+
+<p><strong>新增一个注入点要过哪些闸门</strong>：① 形态 —— 同一 vanilla 方法最多 1 个点、每点最多 1 条指令、不改类结构与控制流；② 注入器与选址 —— 必须可链式，优先 HEAD / TAIL / RETURN，避免 CONSTANT 与 ordinal 定位，热路径点单独论证；③ 复用评估 —— 先看能否复用已有注入点，复用成功即"零新增注入面"；④ 登记 —— 同一变更内让四面同步并写明理由，可见性改动（access widener / AT）同样逐条登记。</p>
+
+<p class="note">闸门语义是"变更必须显式登记"，不是"禁止增长"：注入面变化不被禁止，未同步的漂移一律 FAIL。失败路径已实测：把台账副本的摘要改成与代码镜像不一致的数字后再跑一次，闸门精确报出 <code>ledger doc summary differs from code mirror</code> 并以 exit 1 / BUILD FAILED 收场。</p>
+
+<h2>7. 归因工具箱</h2>
+
+<table>
+<tr><th>工具 / 通道</th><th>怎么用</th></tr>
+<tr>
+  <td>自检报告行</td>
+  <td>格式 <code>[brush] selftest: &lt;key&gt;=&lt;value&gt;</code>，整段由 <code>===== SELFTEST REPORT/END =====</code> 包裹 —— <code>grep "selftest:"</code> 即可机器提取。双通道取证：控制台 stdout + 游戏侧 <code>run/logs/latest.log</code></td>
+</tr>
+<tr>
+  <td>注入命中清单</td>
+  <td>设计数 <code>injection.points(ledger)</code> / <code>injected.classes(ledger)</code> + 逐点运行数 <code>hook.&lt;event&gt;: listeners/hits/fired</code>，收束行 <code>injection.audit: N/N expected hook(s) fired, M missing</code>；启动日志另打 <code>injection points: 21, injected vanilla classes: 16</code></td>
+</tr>
+<tr>
+  <td>模式切换观察点</td>
+  <td><code>host=</code>、<code>mixin.service=</code>、<code>host.guard: ok</code> —— 这一项出问题会让后面的判断全部无意义</td>
+</tr>
+<tr>
+  <td>overwrite 告警</td>
+  <td>扫描器已撤销，报告固定打印 <code>overwrite.scan=not-implemented</code>。形态 B的防线回退为 <code>require=1</code> + mixin / 宿主冲突日志 + 薄注入选址</td>
+</tr>
+<tr>
+  <td>mixin 审计落盘</td>
+  <td><code>-Dbrush.mixin.dump=true</code>打开上游 <code>mixin.debug.export</code>，并注册退出钩子把"哪些 mixin 施加到了哪个目标类"落盘为 <code>.mixin.out/brush-audit-trail.log</code>。S2/S3 直接传上游 <code>-Dmixin.debug.export=true</code>。边界：进程被强杀时钩子不执行，无产物</td>
+</tr>
+<tr>
+  <td>崩溃报告</td>
+  <td>实例运行目录下 <code>run/crash-reports/crash-&lt;时间戳&gt;-client.txt</code>；正文末尾由 Brush 追加 <code>-- Brush --</code> 段。注入点 = <code>CrashReport#getDetails(StringBuilder)</code> TAIL</td>
+</tr>
+</table>
+
+<p><strong>标准排查顺序</strong>：① 看清崩溃栈指向 MC 类 / 库类 / 我们自己的类，还是"无报错只是不生效"；② 跑自检模式拿宿主类型与版本、注入点命中清单、overwrite 告警、已加载 mod 列表；③ 确认 Brush 模式切换正确；④ 最小复现；⑤ 与 S1 逐项对比环境。跨运行时崩溃的结论写进实测结论台账并附真实日志与复现步骤 —— <strong>禁止</strong>在没有日志的情况下写"应该是某某问题"。</p>
+
+<h2>8. 发布版与完整开发树的差别</h2>
+
+<p>导出项目只做两件事：<strong>产出本体</strong>与<strong>自举运行资产</strong>。测试装置是有意精简掉的：已移除的测试性运行配置包括 <code>runSelftest</code>(T1) / <code>runFabricSelftest</code>(T2) / <code>runNeoForgeSelftest</code>(T3) / <code>footprintCheck</code>(T4) / <code>compatTest*</code> / <code>modTest</code> / <code>runRealityProbe*</code> / <code>runExampleClient*</code> / <code>archive*Log</code>；已移除的测试代码与夹具链包括单测源码、自检与实机探针源码，以及 <code>compileExampleMod</code> / <code>generateFixtureMod</code> 等夹具任务。</p>
+
+<p><strong>保留</strong>：<code>runClient</code> / <code>runFabricClient</code> / <code>runNeoForgeClient</code>，以及 <code>bootstrap</code> / <code>metadata</code> / <code>libraries</code> / <code>assets</code> / <code>installNeoForge</code> / <code>check</code>。<strong>产物</strong>：<code>build/libs/Brush-&lt;version&gt;.jar</code> 是 <code>gradlew build</code> 的必产出；<code>brush-api-contract.jar</code> 是可选产物。</p>
+
+<div class="warn">
+<strong>要跑矩阵就得用含测试装置的完整开发树</strong>：四道门禁、实机探针、归档任务与注入面台账都在那一份源码里，发布树只保留"产出本体 + 自举运行资产"。发布树里找不到 <code>runSelftest</code> 不是"任务坏了"，而是发布范围。精简后的本体 jar 与完整开发树的同源产物逐条目零差异。
+</div>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

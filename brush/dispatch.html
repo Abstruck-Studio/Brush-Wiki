@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>派发层与事件 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>派发层与事件</h1>
+<p class="lead">派发层把「薄注入」与「mod 能用的语义事件」连起来：vanilla 方法体内只有一条 <code>Dispatcher.fire(...)</code>，所有决策逻辑落在我们自己的派发表里。页面覆盖 <code>fire</code> 的重载形态、L1 钩子与 L2 语义事件的分层、监听器的注册 / 注销与线程语义、事件载荷的类型化契约、派发表的调试能力，以及一条事件从 vanilla 到 mod 监听器的完整链路。</p>
+
+<p class="muted">上游见 <a href="injection.html">注入层</a>；每个方法只准有一个注入点、一条指令的理由见 <a href="limits.html">最小改动原则与禁止清单</a>。</p>
+
+<h2>调用形态与重载</h2>
+<p>派发器是 <code>org.abstruck.brush.transform.Dispatcher</code>，全静态、普通 Java 代码。<code>fire</code> 目前有 5 个重载，参数个数决定是否要建参数数组：</p>
+<table>
+<tr><th>重载</th><th>参数数组</th><th>典型用途</th></tr>
+<tr><td><code>fire(HookEvent)</code></td><td>共享常量空数组 <code>NO_ARGS</code>，<strong>不分配</strong></td><td>热路径首选 —— <code>client.tick</code> / <code>client.run</code> / 各注册窗口</td></tr>
+<tr><td><code>fire(HookEvent, Object)</code></td><td>有监听器时才 <code>new Object[]{arg}</code></td><td><code>crash.report.details</code></td></tr>
+<tr><td><code>fire(HookEvent, Object, Object)</code></td><td>同上</td><td><code>hud.extract</code>、<code>input.key.press</code>、<code>network.payload</code></td></tr>
+<tr><td><code>fire(HookEvent, Object, Object, Object)</code></td><td>同上</td><td><code>network.server.payload</code>（<code>Reply</code> / <code>Identifier</code> / <code>byte[]</code>）</td></tr>
+<tr><td><code>fire(HookEvent, Object, Object, Object, Object)</code></td><td>同上</td><td><code>creative.tab.output</code></td></tr>
+</table>
+<p>三参重载是 2026-10-15 才补上的：此前只有 0 / 1 / 2 / 4 参，而 <code>network.server.payload</code> 改成 <code>(Reply, id, data)</code> 后恰为 3 参（<code>Dispatcher</code> javadoc）。</p>
+
+<h3>热路径的零开销短路</h3>
+<p><code>fire</code> 的第一动作是 <code>TABLE.get(event.id())</code> 加空判断：<strong>事件无人注册时直接返回</strong> —— 零分配、不进循环、不建数组。这是「每帧 tick 上注入一条指令」可安全成立的量化依据。对照被否方案：若走「每次调用都构造事件对象」，每帧都会产生分配压力；我们的事件 id 是常量（<code>HookEvent</code>），无此成本。监听器全部注销后，该事件键会从表中移除，回到最短路径。</p>
+
+<h2>注册、注销与开关</h2>
+<pre><code>// 注册（order 升序；同 order 按注册先后）
+Dispatcher.Registration reg = Dispatcher.register(HookEvents.CLIENT_TICK, listener);
+Dispatcher.Registration reg2 = Dispatcher.register(HookEvents.CLIENT_TICK, 100, listener);
+
+// 开关（只跳过自身，不阻断他人）/ 注销（幂等；也可 try-with-resources）
+reg.setEnabled(false);
+reg.isEnabled();
+reg.unregister();
+try (var r = Dispatcher.register(HookEvents.CLIENT_TICK, listener)) { /* ... */ }</code></pre>
+<ul>
+<li><strong>表结构</strong>：<code>ConcurrentHashMap&lt;String, CopyOnWriteArrayList&lt;Registration&gt;&gt;</code>，按 <code>(order, 注册序号)</code> 升序插入；<code>Registration</code> 自带 <code>volatile</code> 开关位与注销位。</li>
+<li><strong>可链式</strong>：同一事件可注册任意多监听器，彼此独立；不提供任何独占语义。注册 / 注销 / 开关可在任意线程。</li>
+<li><strong>异常不吞</strong>：监听器抛出的异常被包一层带事件 id / order / seq 的 <code>IllegalStateException</code> 立即上抛 —— 快速失败，绝不让 hook 错误静默消失。</li>
+</ul>
+
+<h2>L1 hook 与 L2 语义事件的分层</h2>
+<p>两层共用<strong>同一张派发表</strong>；L2 只是类型化包装，不是第二套引擎。</p>
+<pre><code>vanilla 方法体
+  └─ [唯一的 1 条注入指令] Dispatcher.fire(HookEvents.X, 原始参数...)
+        │
+        ▼
+  派发表（Dispatcher，普通 Java 代码）
+        ├─ L1 监听器：CoreHooks 的计数 / 证据日志 / 内部机制
+        └─ L2 桥接监听器（每事件 1 条）──► mod 的类型化监听器（api.BrushEvents）</code></pre>
+<dl class="kv">
+<dt>L1</dt><dd><code>HookEvents</code> 里的常量，类型为 <code>HookEvent</code>（<code>record HookEvent(String id)</code>）。id 是 L1 内部标识，可随版本调整；常量收敛在 <code>HookEvents</code> 一处，拼错在编译期即失败。派发表内部仍以 id 字符串为键，<strong>键值与类型化之前逐字节一致</strong>，台账 / 日志 / 自检报告按它核对。</dd>
+<dt>L2</dt><dd><code>org.abstruck.brush.api.BrushEvents</code> 的 <code>Event&lt;XxxListener&gt;</code> 常量。每个 <code>Event</code> 持有「承载它的 L1 id」+ 一个桥接函数。<code>Event</code> 的构造器是包私有的：对 mod 而言事件是<strong>封闭集合</strong>，mod 看不到派发表内部结构。</dd>
+<dt>分层的意义</dt><dd>vanilla 一改参数，改的是 L1 那几行适配代码与桥接 lambda；L2 的签名与语义不动，mod 不用动 —— 这是加载器自身「原始钩子层 / 语义层」的实现约定。</dd>
+<dt>注册入口</dt><dd>mod 只经 <code>Event.register(listener)</code>，返回 <code>EventRegistration</code>。注册动作只触碰 <code>Dispatcher</code>，<strong>不解析任何 MC 类型</strong> —— api 包的 MC 类型引用一律是惰性的，因此 mod 入口类构造期即可安全注册。</dd>
+</dl>
+
+<h2>事件载荷的类型化契约</h2>
+<p>L1 的 <code>Object[] args</code> 是弱类型走廊，因此每个事件都用常量 javadoc <strong>逐位钉死载荷</strong>，桥接处做唯一一次强转。几条当前契约：</p>
+<table>
+<tr><th>事件</th><th>载荷（按 <code>args</code> 下标）</th></tr>
+<tr><td><code>input.key.press</code></td><td>[0] <code>KeyEvent</code> record（key / scancode / modifiers）、[1] <code>Integer</code> GLFW action；<strong>不携带窗口句柄</strong></td></tr>
+<tr><td><code>input.mouse.button</code></td><td>[0] <code>MouseButtonInfo</code> record、[1] <code>Integer</code> GLFW action（0=RELEASE / 1=PRESS）</td></tr>
+<tr><td><code>input.mouse.scroll</code></td><td>[0] <code>Double</code> xOffset、[1] <code>Double</code> yOffset</td></tr>
+<tr><td><code>network.payload</code></td><td>[0] <code>Identifier</code>、[1] <code>byte[]</code>—— <strong>2026-10-15 由「单个 <code>BrushPayload</code>」改成 <code>(Identifier, byte[])</code></strong>：核心 L2 桥从此不再持有具体载荷类型，为网络引擎整体搬进库模组铺路</td></tr>
+<tr><td><code>network.server.payload</code></td><td>[0] <code>ServerPayloadEvent.Reply</code>、[1] <code>Identifier</code>、[2] <code>byte[]</code> —— mod 侧因此看不到任何 vanilla 网络类型</td></tr>
+<tr><td><code>creative.tab.output</code></td><td>[0] <code>ResourceKey&lt;CreativeModeTab&gt;</code>、[1] <code>ItemDisplayParameters</code>、[2] <code>Collection&lt;ItemStack&gt;</code>、[3] <code>Set&lt;ItemStack&gt;</code></td></tr>
+<tr><td><code>crash.report.details</code></td><td>[0] <code>StringBuilder</code>—— handler <strong>只许追加</strong>，不得清空 / 重排</td></tr>
+<tr><td><code>data.reload</code></td><td>[0] <code>MinecraftServer</code>、[1] <code>Optional&lt;Throwable&gt;</code></td></tr>
+</table>
+<p>不派发事件的注入点也存在：<code>CustomPacketPayload$1#findCodec</code> 的 RETURN 包装只换 codec，目的 token 记为 <code>network.channel-codec</code>，同 <code>creative.tab.phantom-suppress</code> 的非事件先例。</p>
+
+<h2>线程语义</h2>
+<p>总原则：<strong>派发在触发线程上同步执行</strong>。注册 / 注销 / 开关可在任意线程；派发路径无锁。需要区分的是「异线程」事件：</p>
+<table>
+<tr><th>事件</th><th>触发线程 / 时机</th></tr>
+<tr><td><code>client.run</code> / <code>client.tick</code> / <code>screen.init</code> / <code>screen.resize</code> / <code>hud.extract</code> / <code>input.*</code></td><td>游戏主线程</td></tr>
+<tr><td><code>registries.bootstrap</code> / <code>client.registration</code></td><td>执行 bootstrap 的线程；<strong>因运行时而异</strong> —— S1 = <code>main</code>，S2 = 被推迟到 <code>Minecraft</code> 构造期，S3 = FML 在其 bootstrap 内完成</td></tr>
+<tr><td><code>bootstrap.early</code></td><td>S1 = <code>main</code>；S2 = <code>main</code>；S3 = 宿主 bootstrap 内的工作线程</td></tr>
+<tr><td><code>packs.registered</code></td><td>构造资源包仓库的线程</td></tr>
+<tr><td><code>data.loaded</code></td><td>构造该服务器的线程</td></tr>
+<tr><td><code>data.reload</code></td><td><strong>异步</strong> —— 重载 future 的完成线程；监听器不得触碰屏幕 / 渲染 / 未同步的游戏状态。派发位于 <code>whenComplete</code> 回调：该上下文重抛会被 <code>CompletableFuture</code> 静默吞掉，因此引擎在回调体内 catch + ERROR，这是本工程<strong>唯一</strong>一处有意偏离「异常立即上抛」的点</td></tr>
+<tr><td><code>client.stopping</code></td><td><strong>JVM 关闭线程</strong>；且它不是注入点 —— 事件源是 <code>CoreHooks</code> 安装的 JVM shutdown hook，仅在客户端确实启动过时派发</td></tr>
+</table>
+
+<h2>一条事件的完整链路</h2>
+<p>以最常被观测的每帧事件为例，从上到下的六步：</p>
+<table>
+<tr><th>#</th><th>发生什么</th><th>证据</th></tr>
+<tr><td>1</td><td>vanilla 进 <code>Minecraft.tick()</code>，方法体 HEAD 处执行我们织入的唯一指令</td><td><code>MinecraftMixin</code>：<code>@Inject(method="tick()V", at=@At("HEAD"), require=1)</code></td></tr>
+<tr><td>2</td><td>该指令调用 <code>Dispatcher.fire(HookEvents.CLIENT_TICK)</code></td><td>注入的字节码里只有这一条调用</td></tr>
+<tr><td>3</td><td><code>fire</code> 查表；无监听器则立即返回</td><td><code>Dispatcher.fire(HookEvent)</code> 首行</td></tr>
+<tr><td>4</td><td>按 <code>(order, seq)</code> 升序遍历监听器：先 L1，后 L2 桥接</td><td><code>Dispatcher.dispatch</code></td></tr>
+<tr><td>5</td><td>L1 监听器：<code>CoreHooks</code> 计数 + 节流打印 <code>hook fired: client.tick (hit #N)</code></td><td><code>CoreHooks.install()</code> 内该事件的注册</td></tr>
+<tr><td>6</td><td>L2 桥接把类型化监听器取出：<code>BrushEvents.CLIENT_TICK</code> 以<strong>无载荷单例</strong> <code>ClientTickEvent.INSTANCE</code> 送达 mod 的 <code>onClientTick(...)</code></td><td><code>BrushEvents.CLIENT_TICK</code> 的桥接 lambda</td></tr>
+</table>
+<p class="muted">同一形状换事件即可：<code>bootstrap.early</code> 的第 1 步是 <code>Bootstrap.bootStrap()</code> HEAD 上的 <code>EarlyBoot.onBootstrap()</code>；<code>crash.report.details</code> 的第 1 步是 <code>CrashReport#getDetails(StringBuilder)</code> 的 TAIL，第 5 步的监听器把 Brush 段追加进 <code>StringBuilder</code>。</p>
+
+<div class="note">
+<strong>加一个 hook 不需要重新 transform。</strong> 注入进字节码的永远只有那一条 <code>fire</code> 调用；新增订阅只动派发表。这正是「footprint 不随 hook 数量增长」的含义，也是「新增注入点前先评估能否复用已有注入点」这条纪律的底气。
+</div>
+
+<h2>调试能力：计数、dump 与日志怎么读</h2>
+<h3>派发表是活对象</h3>
+<ul>
+<li><code>Dispatcher.listenerCount(HookEvent)</code> / <code>listenerCount(String)</code>：某事件当前监听器数。String 重载是给自检源集回查用的走廊，新代码一律用 <code>HookEvent</code> 版本。</li>
+<li><code>Dispatcher.listenerCounts()</code>：<strong>全表快照</strong>。这就是「dump 派发表」的公开形态。</li>
+<li>计数快照在 <code>CoreHooks</code> 侧：<code>hitCounts()</code>、<code>infoHitCounts()</code>、<code>stoppingHits()</code>、<code>creativeTabHits()</code>。自检报告读的就是这些，并与台账的数字并列展示。</li>
+<li>mixin 侧另有被动审计：<code>BrushAuditTrail</code> 实现 sponge-mixin 的 <code>IMixinAuditTrail</code>，在每次真实施加时收一条 <code>Applied(target, mixin)</code>，记录串形如 <code>&lt;config&gt;:&lt;mixin FQN&gt; from mod &lt;modid&gt;</code>。它<strong>不改变任何变换决策</strong>；S2/S3 下 mixin 子系统归宿主，本记录保持空集。</li>
+</ul>
+
+<h3>hook fired 日志行怎么读</h3>
+<pre><code>[12:59:10] [main/INFO]: [brush]   mixin config registered: brush.mixins.json
+[12:59:10] [main/INFO]: [brush]   injection points: 21, injected vanilla classes: 16 (footprint ledger: …)
+[12:59:10] [main/INFO]: [brush] hook fired: bootstrap.early (hit #1)
+[12:59:15] [Render thread/INFO]: [brush] hook fired: client.run (hit #1)
+[12:59:15] [Render thread/INFO]: [brush] hook fired: client.tick (hit #1)
+[13:00:05] [Render thread/INFO]: [brush] hook fired: client.tick (hit #1000)</code></pre>
+<ul>
+<li>行内三要素：<code>hook fired:</code> + <strong>事件 id 字符串</strong>+ <code>(hit #N)</code> 触发计数。</li>
+<li><strong>时间戳与线程名在行首</strong>：<code>main</code> / <code>Render thread</code> 等是判断「这个事件在哪个线程触发」的第一手证据。上例中 mixin 配置注册与注入面数字都发生在 <code>main</code>，而 <code>client.run</code> / <code>client.tick</code> 在 <code>Render thread</code>。</li>
+<li><strong>节流频率</strong>：<code>client.tick</code> 与 <code>hud.extract</code> 是「第 1 次 + 之后每 1000 次一行」；输入三键每 512 次；<code>creative.tab.output</code> 与网络每 64 次；注册窗口 / <code>bootstrap.early</code> / <code>packs.registered</code> / <code>data.loaded</code> / <code>data.reload</code> / <code>crash.report.details</code> 是每次触发都打印。因此「<code>hit #1000</code> 之后没有新行」不代表 hook 停了。</li>
+<li><strong>注入面两行合看</strong>：<code>mixin config registered</code> 证明配置入了待选队列，<code>injection points: N, injected vanilla classes: M</code> 是设计侧数字。设计侧命中不等于运行期真触发 —— 后者由 <code>hook fired</code> 行自证：派发链断开就等不到这一行。</li>
+<li><code>client.stopping</code> 的证据行不走 log4j 而走 <code>RawStdout</code>：触发时游戏侧 log4j 已关闭，经 <code>System.out</code> 的输出会被静默丢弃。</li>
+</ul>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

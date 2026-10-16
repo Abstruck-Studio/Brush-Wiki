@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>平台适配与自检 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>平台适配与自检</h1>
+<p class="lead">Brush API 的天花板是最受约束的平台，因此平台差异必须有一个受控的泄压阀。本页讲三件事：逃生舱 <code>@BrushExpectPlatform</code> 的契约与纪律、自检契约（<code>ModSelfTest</code> / <code>ModClientTest</code> / <code>ClientTestContext</code>）与裸输出 <code>RawStdout</code>，以及同一份 API 在 S1/S2/S3 下的行为对照。</p>
+
+<h2>1. 为什么需要逃生舱</h2>
+
+<p>结论先行：<b>有些事本质因平台而异，硬统一会把 API 做畸形。</b>注册时机、网络通道、启动时序在三运行时确实不同；把它们塞进一套签名，得到的会是一套"为了兼容而谁也不像"的接口。</p>
+
+<p>这是 Brush API 设计原则的第三条：API 只暴露三平台<b>共同可实现</b>的能力，而平台特定部分走 Architectury <code>@ExpectPlatform</code> 模式的等价物。设计文档把动因写得更直白 —— "有些事本质因平台而异，硬统一会导致 API 畸形，'写一次跑三处'必须有泄压阀"。</p>
+
+<p>同期存在的另一条约束是天花板问题：S1 下 Brush 是加载器、能力最强；S2/S3 下 Brush 只是一个 mod，只能做 mixin 允许的事。<b>API 不得暴露只有 S1 才做得到的能力</b>，否则"写一次跑三处"是假承诺。</p>
+
+<div class="note">
+逃生舱不是失败，是必要的泄压阀。但它是<b>有代价</b>的：每多一个逃生舱，跨平台承诺就多一个缺口 —— 因此才有下面第 4 节的纪律。
+</div>
+
+<h2>2. <code>@BrushExpectPlatform</code> 的用法</h2>
+
+<p>契约一句话：<b>注解在静态桩方法上，方法体在 mod 加载期被替换为对当前运行时实现类的委托调用；mod 代码照常直接调用桩方法。</b></p>
+
+<table>
+<tr><th>项</th><th>契约</th></tr>
+<tr><td>标注位置</td><td>静态方法；所在类<b>不得</b>是接口 / 抽象类</td></tr>
+<tr><td>实现类命名</td><td><code>&lt;桩类全名&gt;Impl</code> + <code>Brush</code> / <code>Fabric</code> / <code>NeoForge</code>，与桩<b>同包</b></td></tr>
+<tr><td>实现方法</td><td>与桩方法<b>同名同签名</b>的 static 方法</td></tr>
+<tr><td>缺失语义</td><td><b>硬失败</b>：当前运行时找不到实现类或方法 = 加载失败，报错指明缺哪个类 / 哪个方法，不静默回退</td></tr>
+<tr><td>运行时成本</td><td>委托调用是普通 <code>invokestatic</code>，无反射、无查表</td></tr>
+<tr><td>注解保留</td><td><code>RetentionPolicy.CLASS</code></td></tr>
+<tr><td>预处理对象</td><td>mod jar（<code>mod.ModJarPreparer</code>），<b>不是</b> vanilla 类 —— 不产生注入点、不进 footprint 台账</td></tr>
+<tr><td>参数 / 返回值</td><td>类型须三运行时同名可及；26.1.2 三运行时统一官方名，直接用官方名类型即可</td></tr>
+<tr><td>不支持</td><td>恒为空 body 的实现不受支持</td></tr>
+</table>
+
+<p class="muted">出处：<code>BrushExpectPlatform</code> javadoc 与 mod jar 预处理实现。</p>
+
+<h3>真实用例：示例 mod 的 <code>Platform</code></h3>
+
+<p>这是 MDK 示例 mod 里的真实代码（<code>org.abstruck.brush.example.Platform</code>），两个桩方法：</p>
+
+<pre><code>package org.abstruck.brush.example;
+
+import org.abstruck.brush.api.BrushExpectPlatform;
+
+public final class Platform {
+
+    private Platform() {
+    }
+
+    /** 当前加载器平台的名字（三实现分别返回 "Brush" / "Fabric" / "NeoForge"）。 */
+    @BrushExpectPlatform
+    public static String loaderName() {
+        throw new AssertionError("Platform.loaderName() stub body must have been replaced at load time"
+                + " (BrushExpectPlatform; mod jar preprocessing did not run -- regression!)");
+    }
+
+    /** 当前运行时种类（与 mod.RuntimeKind 枚举名同口径：BRUSH / FABRIC / NEOFORGE）。 */
+    @BrushExpectPlatform
+    public static String runtimeKind() {
+        throw new AssertionError("Platform.runtimeKind() stub body must have been replaced at load time"
+                + " (BrushExpectPlatform; mod jar preprocessing did not run -- regression!)");
+    }
+}</code></pre>
+
+<p>桩体写成"抛 <code>AssertionError</code>"是有意的：万一预处理未生效，调用当场失败，而不是静默返回假值 —— 失败要响亮。</p>
+
+<p>当前运行时的实现类：</p>
+
+<pre><code>package org.abstruck.brush.example;
+
+public final class PlatformImplBrush {
+
+    private PlatformImplBrush() {
+    }
+
+    public static String loaderName() {
+        return "Brush";
+    }
+
+    public static String runtimeKind() {
+        return "BRUSH";
+    }
+}</code></pre>
+
+<h3>三运行时各自挑哪个实现</h3>
+
+<table>
+<tr><th>运行时</th><th>选中的实现类</th><th><code>loaderName()</code></th><th><code>runtimeKind()</code></th></tr>
+<tr><td>S1 纯 Brush</td><td><code>PlatformImplBrush</code></td><td><code>"Brush"</code></td><td><code>"BRUSH"</code></td></tr>
+<tr><td>S2 Fabric 宿主</td><td><code>PlatformImplFabric</code></td><td><code>"Fabric"</code></td><td><code>"FABRIC"</code></td></tr>
+<tr><td>S3 NeoForge 宿主</td><td><code>PlatformImplNeoForge</code></td><td><code>"NeoForge"</code></td><td><code>"NEOFORGE"</code></td></tr>
+</table>
+
+<p>同一份 mod 字节码、同一个桩方法调用点，三运行时得到三个实现 —— 逃生舱机制端到端成立。</p>
+
+<h3>三个 <code>PlatformImpl*</code> 的差异（读源码后的如实描述）</h3>
+
+<p><b>只有返回的字面量不同。</b>三个实现类都是 <code>public final</code>、都有 <code>private</code> 无参构造器、都声明了同名同签名的两个 <code>public static String</code> 方法，方法体各自 <code>return</code> 一个常量字符串。类 javadoc 也只差"S1/S2/S3 实现"一句话。没有任何一个实现引用平台特有的类型或 API —— 这恰好说明示例 mod 的逃生舱只用于<b>演示机制本身</b>，不是真实的能力需求。</p>
+
+<div class="note">
+S1 的命名曾经历一次修订：<code>RuntimeKind.VANILLA</code> → <code>BRUSH</code>、实现类后缀 <code>ImplVanilla</code> → <code>ImplBrush</code>、展示串去掉 <code>(standalone)</code> 标记。修订后的 T1 证据为 <code>loaderName=Brush, runtimeKind=BRUSH</code>。源码与修订后的口径一致。
+</div>
+
+<h2>3. 写逃生舱的纪律</h2>
+
+<p><b>每个逃生舱都要有存在理由；数量要审计。</b>项目风险登记册把"平台特定逃生舱被滥用"列为中风险，缓解措施就是两条：<b>每个逃生舱登记理由</b>、<b>定期审计数量</b>。</p>
+
+<p>落地的可操作口径如下：</p>
+
+<ol>
+<li><b>先论证"能不能不写"</b>。能被 L2 现有事件 / 注册面表达的需求，一律不加逃生舱。</li>
+<li><b>一个桩，一个理由</b>。桩类里每多一个桩方法，就是一处"三平台语义可能不同"的声明，需要在文档与代码注释里写明理由。</li>
+<li><b>别把逃生舱当 API 的补丁</b>。如果某个能力在三平台都有对应实现、只是签名难对齐，那是 API 设计问题，不是逃生舱问题。</li>
+<li><b>数量可审计</b>。示例 mod 现有 <b>1 个桩类 / 2 个桩方法</b>（<code>Platform</code>），这是目前唯一的逃生舱真实用例。</li>
+<li><b>不留静默回退</b>。找不到实现就是加载失败 —— 静默回退会让"三平台一致"变成运行时惊喜。</li>
+</ol>
+
+<h2>4. 自检契约</h2>
+
+<p>自检能力本身就是 API 面的一部分 —— 这是"可测试性"作为能力的体现。三个类型的分工是：<code>ModSelfTest</code> 管<b>装载期</b>，<code>ModClientTest</code> + <code>ClientTestContext</code> 管<b>进世界之后</b>。</p>
+
+<h3>4.1 <code>ModSelfTest</code> —— 装载期端到端断言</h3>
+
+<dl class="kv">
+<dt>签名</dt><dd><code>Map.Entry&lt;String, Boolean&gt; selfTest()</code></dd>
+<dt>调用时机</dt><dd>仅在 <code>--brush.selftest</code> 运行中；<b>自检退出点 = 首个 <code>client.tick</code></b>，对每个入口实例<b>恰一次</b></dd>
+<dt>调用时刻的既成事实</dt><dd>内容注册窗口与客户端注册 flush 均已过去、<code>Minecraft</code> 实例已构造 —— 注册表、<code>DefaultAttributes</code>、<code>SpawnPlacements</code>、渲染器 / 屏幕映射都可直接读取断言</dd>
+<dt>实现位置</dt><dd>自检对 <code>ModBootstrap.loadedMods()</code> 的<b>入口实例</b>做 <code>instanceof</code> 探测 —— 主入口 <code>BrushModInitializer</code> 或客户端入口 <code>BrushClientModInitializer</code> 实例实现本接口均可</dd>
+<dt>失败语义</dt><dd>实现方<b>不得抛出</b>；抛出= 记为 FAIL 并如实上报异常栈。任一 FAIL 置退出码位 <code>256</code>（<code>Selftest.EXIT_MOD_SELFTEST</code>）</dd>
+<dt>无实现时</dt><dd>报告为信息行，<b>不是失败</b></dd>
+</dl>
+
+<p>实现最小形：</p>
+
+<pre><code>import java.util.Map;
+import org.abstruck.brush.api.BrushModInitializer;
+import org.abstruck.brush.api.ModSelfTest;
+
+public final class MyMod implements BrushModInitializer, ModSelfTest {
+
+    @Override
+    public void onInitialize() {
+        // 注册事件监听器 / 内容
+    }
+
+    @Override
+    public Map.Entry&lt;String, Boolean&gt; selfTest() {
+        boolean ok = /* 端到端断言：例如注册表里查得到自己的条目 */ true;
+        return Map.entry("my_check", ok);
+    }
+}</code></pre>
+
+<h3>4.2 <code>ModClientTest</code> + <code>ClientTestContext</code> —— 进世界之后的断言</h3>
+
+<p>与 <code>ModSelfTest</code> 的差异是覆盖面：<code>ModSelfTest</code> 覆盖装载期；<code>ModClientTest</code> 覆盖<b>进世界之后</b>的一切。</p>
+
+<table>
+<tr><th>项</th><th>契约</th></tr>
+<tr><td>签名</td><td><code>Map&lt;Map.Entry&lt;String, Boolean&gt;, ?&gt; runClientTest(ClientTestContext context)</code></td></tr>
+<tr><td>调用时机</td><td>仅 <code>--brush.mod-test</code> 运行中；<code>CLIENT_READY</code> 之后由加载器（<code>selftest.ModTestProbe</code>）对每个声明了测试入口的 mod 入口实例<b>恰一次</b></td></tr>
+<tr><td>声明方式</td><td>经 <code>brush.mod.json</code> 的 <code>entrypoints.test</code> 列出实现类全名。源码：<code>ModMetadata.Entrypoints.test</code> javadoc。<span class="muted">注意：<code>ModClientTest</code> 的 javadoc 原文写的是"经 <code>brush.mod.json</code> 的 <code>test</code> 附加节声明"，与实现的 <code>entrypoints.test</code> 键名不一致 —— 以源码为准</span></td></tr>
+<tr><td>缺省</td><td>不声明则该 mod 在本模式下不运行任何测试，加载照常</td></tr>
+<tr><td>失败语义</td><td>实现方<b>不得抛出</b>；抛出 = 该 mod 全部检查项 FAIL；返回 <code>null</code> / 键为 null / 值为 null = 格式非法 FAIL</td></tr>
+<tr><td>常规运行</td><td>零加载、零调用、零成本</td></tr>
+</table>
+
+<p><code>ClientTestContext</code> 是把"进世界"的样板代码收编成的只读上下文 —— 由加载器侧构造，<b>mod 实现只读使用，不得自行 new</b>。它提供四项能力：</p>
+
+<pre><code>Minecraft minecraft();                       // 当前客户端实例（CLIENT_READY 之后必然非 null）
+void quickPlayOrCreateWorld(String worldName); // 建/进临时世界并等"可玩"（含关掉首启辅助功能屏）
+boolean awaitServerReady(long timeoutMs);    // 轮询"服务端 tick 已启动且集成服务器非 null"；超时返回 false，不抛
+Path gameDirectory();                        // 游戏目录（mod 测试装置写产物用）
+void screenshot(String name);                // 统一截屏落盘到 &lt;gameDirectory&gt;/mod-test-screenshots/&lt;name&gt;.png</code></pre>
+
+<p>线程语义：方法在游戏主线程被调用；<code>screenshot</code> 与 <code>awaitServerReady</code> 可阻塞主线程。失败不静默降级 —— <code>quickPlayOrCreateWorld</code> 失败抛 <code>IllegalStateException</code>，<code>screenshot</code> 失败抛 <code>RuntimeException</code>。</p>
+
+<p><b>退出码协议</b>：加载器保留 <code>bit 0..15</code>；<code>bit 16+</code>（值 <code>65536</code> 起）交 mod 自定测试项位组合 —— mod 实现若需要位组合，用 <code>1 &lt;&lt; 16</code> 起算。</p>
+
+<h3>4.3 为什么把自检放进 API</h3>
+
+<ul>
+<li><b>没有它，"三平台语义一致"只能靠人眼。</b>语义漂移是最高风险之一（G2），而端到端断言是唯一机械的验证手段。</li>
+<li><b>断言的知识只有 mod 自己有。</b>加载器能查"注册了几个条目"，但查不出"这个条目在我的 mod 里是不是真的能用"—— 后者必须由 mod 写。</li>
+<li><b>它是零成本的。</b><code>ModSelfTest</code>/<code>ModClientTest</code> 只在对应模式下被探测与调用；常规运行零监听、零调用。</li>
+<li><b>它不需要 mod 引进新依赖。</b>两个接口的返回值都是纯 JDK 类型（<code>Map</code> / <code>Map.Entry</code>），<code>ModSelfTest</code> 因此零 MC 引用，自检源集可直接引用而不破坏其"零 MC 引用"类加载不变量。</li>
+<li><b>它让 mod 的断言进退出码</b>，从而进自动化矩阵。</li>
+</ul>
+
+<h2>5. <code>RawStdout</code>：受控的裸输出</h2>
+
+<p>用途只有一条：<b>在日志系统已经不可靠的时刻，仍然留下证据。</b></p>
+
+<p>具体场景是 <code>CLIENT_STOPPING</code> 的监听器 —— 它在 JVM 关闭序列中执行，此时游戏侧 log4j 已关闭，且 MC 启动时已把 <code>System.out</code> 换成 log4j 承接的流。经 log4j 或 <code>System.out</code> 的关闭期输出会被<b>静默丢弃</b>。<code>RawStdout.println(String)</code> 改为经 <code>FileDescriptor.out</code> 直写进程 fd 1，绕开这两个环节。</p>
+
+<dl class="kv">
+<dt>语义</dt><dd>输出直达进程 stdout—— <b>不进 latest.log</b>；不经过 log4j、不经过 <code>System.out</code> 的重定向 —— 任意线程、任意时刻可用；永久不抛异常</dd>
+<dt>降级行为</dt><dd>fd 打开失败时回退 <code>System.out</code> —— 降级而非失败，证据通道绝不因打印失败中断关闭序列</dd>
+<dt>实现位置</dt><dd>API 面是薄委托，实现为 <code>org.abstruck.brush.transform.RawStdout</code></dd>
+</dl>
+
+<div class="warn">
+<b>使用纪律</b>：<code>RawStdout</code> 不是日志的替代品。其余事件触发时 log4j 正常存活，<b>常规 log4j 日志即可</b>。只有"机器可读的报告行 / 关闭期证据"才走这条通道 —— 因为它绕过了日志系统，也就绕过了日志的采集、轮转与分级。
+</div>
+
+<h2>6. 三运行时能力对照表</h2>
+
+<h3>6.1 同一 API 在 S1/S2/S3 的一致性</h3>
+
+<table>
+<tr><th>API</th><th>S1 纯 Brush</th><th>S2 Fabric 宿主</th><th>S3 NeoForge 宿主</th></tr>
+<tr><td><code>BrushEvents.*</code></td><td>核心自己的注入点</td><td>同一份 mixin 配置</td><td>同一份 mixin 配置</td></tr>
+<tr><td><code>BrushRegistry</code> 内容 / 客户端组</td><td>同一语义</td><td>同一语义</td><td>同一语义</td></tr>
+<tr><td><code>BrushMods</code></td><td>同一语义</td><td>同一语义</td><td>同一语义</td></tr>
+<tr><td><code>BrushKeybinds</code></td><td>核心自己的注入点拼接数组</td><td>与 Fabric 的 <code>OptionsMixin</code> <b>同时</b>拼接</td><td>与 NeoForge 的补丁同时拼接</td></tr>
+<tr><td><code>BrushCreativeTabs</code> / <code>BrushCreativeTab</code></td><td>同一语义</td><td>额外需为桥页补 Fabric 分页页码</td><td>同一语义</td></tr>
+<tr><td><code>BrushDataRegistries</code> / <code>BrushRegistry.dataRegistry</code></td><td>装载 = 集成服务器构造完成 / 数据重载完成</td><td>同左</td><td>同左</td></tr>
+<tr><td><code>BrushNetwork</code></td><td>无额外限制</td><td>无额外限制</td><td><b>有额外限制</b>：通道必须在<b>主入口</b> <code>onInitialize()</code> 登记，见下</td></tr>
+<tr><td><code>@BrushExpectPlatform</code></td><td>选 <code>*ImplBrush</code></td><td>选 <code>*ImplFabric</code></td><td>选 <code>*ImplNeoForge</code></td></tr>
+<tr><td><code>ModSelfTest</code> / <code>ModClientTest</code></td><td>同一语义</td><td>同一语义</td><td>同一语义</td></tr>
+</table>
+
+<div class="warn">
+<b>S3 唯一的"必须在哪注册"硬约束</b>：<code>BrushNetwork.register(...)</code> 必须放在<b>主入口点</b>，不要放在 <code>entrypoints.client</code>。原因：S3 只给<b>一次</b>载荷登记机会，宿主适配器在那一刻把当时已知的通道桥接进 NeoForge 注册表，而客户端入口点比它晚 —— 在那里登记的通道在 S3 下<b>发不出去</b>。该情形会由引擎的发送守卫<b>响亮失败</b>并给出补救指引（S1/S2 无此限制）。出处：<code>BrushNetwork#register</code> javadoc、<code>NeoForgePayloadBridge</code> javadoc。
+</div>
+
+<h3>6.2 哪些能力只在 S1 有，因此不进 API</h3>
+
+<p>判据是"这个能力在 S2/S3 下还成立吗"。不成立的，一律留在加载器内部，不做成 L2。</p>
+
+<table>
+<tr><th>只在 S1 成立的能力</th><th>为什么进不了 API</th></tr>
+<tr><td colspan="2" class="muted">以下条目由加载器内部持有</td></tr>
+<tr><td>P1 启动管线</td><td>S2/S3 下启动由宿主（Fabric Loader / FML）完成，Brush 只是被装载的一个 mod。暴露它等于让 mod 依赖"自己是启动器"这个前提</td></tr>
+<tr><td>自研 <code>ClassLoader</code> / Mixin 服务（<code>BrushMixinService</code>）</td><td>宿主有 Knot / FML 自己的加载器与 mixin 子系统；<code>brush.standalone</code> 守卫让我们的服务在宿主下让位</td></tr>
+<tr><td><code>--brush.selftest</code> 的进程退出与退出码协议（<code>Selftest</code>）</td><td>报告与退出码属加载器自身的验证装置，是"加载器怎么证明自己"，不是 mod 的能力面。mod 侧只经 <code>ModSelfTest</code> 往里贡献检查项</td></tr>
+<tr><td>mod jar 预处理（<code>ModJarPreparer</code>）的细节</td><td>它是发现并重写逃生舱桩的机制本体；mod 需要知道的只有"桩方法会被替换"这条契约</td></tr>
+</table>
+
+<p class="muted">对照：<code>ClientTestContext</code> 的退出码协议则<b>确实</b>是 API 面的一部分 —— 它把 <code>bit 16+</code> 显式让给 mod 自定测试项，这是加载器与 mod 之间的公开约定，与上表最后两行不矛盾。</p>
+
+<h3>6.3 与事件总表的关系</h3>
+
+<p>本页只讲"平台差异与自检"这一条线。每个语义事件的精确触发时机、载荷与线程语义见 <a href="events.html">事件总表</a>；注册动作本身怎么落到派发表上，见第一部分 <a href="../brush/dispatch.html">派发层与事件</a>。全部公开类型的逐项清单见 <a href="reference.html">API 参考索引</a>。</p>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

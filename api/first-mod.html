@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第一个 mod（MDK 上手） · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>第一个 mod（MDK 上手）</h1>
+<p class="lead">MDK 是<b>扁平的一体化开发包</b>：解压后 <b>项目根就是可运行的 Gradle 工程</b>，加载器与能力库<b>默认从网络库取</b>。两条命令跑通 S1，之后 S2 / S3 各一条命令 —— <b>三种运行时都在这一个文件夹里跑</b>。读完后你知道每个任务做什么、依赖从哪里来、日志里哪一行证明加载成功，以及初始化期为什么只能注册监听器。</p>
+
+<div class="note"><b>下载 MDK：</b><a href="../Brush-MDK-26.10.1.zip">Brush-MDK-26.10.1.zip</a>（约 66 KB）—— 解压即得本页描述的那个扁平项目。</div>
+
+<h2>一、MDK 里有什么</h2>
+
+<table>
+<thead><tr><th>路径</th><th>是什么</th></tr></thead>
+<tbody>
+<tr><td>项目根（<code>build.gradle</code> / <code>settings.gradle</code> / <code>gradle.properties</code> / <code>gradlew.bat</code> / <code>src/</code>）</td><td><b>你的 mod 项目本体</b>：源码、资源、<code>brush.mod.json</code> 与 Gradle Wrapper 全在<b>根目录</b>，并带一个可运行的示例 mod。</td></tr>
+<tr><td>依赖来源：<code>com.github.Abstruck-Studio:Brush:26.10.1</code></td><td><b>加载器</b>—— 同时是游戏启动器与自举工具：运行时由它拉起游戏、加载你的 mod；下载 MC 的自举主类（<code>metadata</code> / <code>libraries</code> / <code>assets</code>）也在它里面，而 <code>metadata</code> 由构建期自动触发。</td></tr>
+<tr><td>依赖来源：<code>com.github.Abstruck-Studio:Brush-API:1.0.0</code></td><td><b>能力库</b>—— 作者契约面的来源之一。</td></tr>
+<tr><td>依赖来源：同加载器坐标的 <code>tools</code> classifier</td><td><b>宿主 harness</b>：<code>FabricHostHarness</code> / <code>NeoForgeHostHarness</code> 及其 profile —— S2 / S3 的运行靠它装配并拉起宿主。它只依赖加载器 jar 的 <code>launch/**</code> 与 gson / log4j，<b>不含任何第三方二进制</b>。</td></tr>
+<tr><td><code>libs/*.jar</code></td><td>只在传 <code>-Pbrush.useLocalJars=true</code> 时使用：把上面三份 jar 放进 <code>libs/</code> 即可完全离线。</td></tr>
+</tbody>
+</table>
+
+<div class="note">项目根的 <code>gradlew.bat</code> 是 <b>Gradle 官方 Wrapper</b>，不是本 MDK 的配置脚本 —— <b>除此之外 MDK 没有任何 .bat 脚本</b>，一切通过这个 Gradle 工程的命令完成。依赖解析是<b>惰性</b>的：<code>gradlew help</code> / <code>tasks</code> 不会联网，只有编译或运行才去取坐标。</div>
+
+<p>前置两件事：<b>JDK 25</b>；首次构建需要联网。</p>
+
+<h2>二、两条命令：从零到能跑</h2>
+
+<p>命令都在<b>项目根目录</b>下执行。<b>构建即自举</b>（2026-10-16 起）：<code>jar</code> 会在构建期自动把 <b>MC 客户端 jar</b> 下下来，所以<b>不需要先手动跑 <code>bootstrap</code></b>；<code>runClient</code> 之前也会自动补齐库与资产。</p>
+
+<pre><code>:: ① 编译你的 mod（构建期自动确保 MC 客户端 jar；产物 build\libs\mdkexample.jar）
+gradlew.bat jar
+
+:: ② 启动游戏并加载你的 mod（S1：vanilla + Brush）
+gradlew.bat runClient</code></pre>
+
+<p class="muted">可选：想"一次性备齐"就显式跑 <code>gradlew.bat bootstrap</code>（S3 再补 <code>installNeoForge</code>）。离线 / CI 想完全自己掌控，可传 <code>-Pbrush.autoBootstrap=false</code> 关掉自动自举 —— 那时缺件仍然<b>可读失败</b>，不会静默跳过。</p>
+
+<p>这个项目一共 <b>11 个任务</b>，全部在项目根目录下执行：</p>
+
+<table>
+<thead><tr><th>任务</th><th>作用与落地</th></tr></thead>
+<tbody>
+<tr><td><code>metadata</code> / <code>libraries</code> / <code>assets</code></td><td>自举的三个子步骤：版本元数据 + 客户端 jar（sha1 + size 校验）→ 库与 natives → 资产索引与全部对象。<b>其中 <code>metadata</code> 是构建期自动触发的那个</b>。</td></tr>
+<tr><td><code>bootstrap</code></td><td><b>可选的一次性备齐</b>：一次跑完上面三个子步骤：客户端 jar 到 <code>&lt;gradle 用户目录&gt;/caches/brush/26.1.2/</code>，库 / natives / 资产到 <code>&lt;gradle 用户目录&gt;/caches/brush/cache/</code>。落点是<b>用户级 Gradle 缓存</b>，与 Fabric Loom / NeoForge neoform 同款 —— <b>项目根不再出现 <code>26.1.2/</code> 与 <code>cache/</code></b>，而且加载器 / 能力库 / 本示例项目默认共享同一份下载。</td></tr>
+<tr><td><code>jar</code></td><td>编译打包你的 mod→ <code>build/libs/mdkexample.jar</code>。依赖默认从 JitPack 解析。</td></tr>
+<tr><td><code>verifyLocalJars</code></td><td>只在传了 <code>-Pbrush.useLocalJars=true</code> 时生效：校验 <code>libs/</code> 下三份 jar 是否齐全，缺件给<b>可读失败</b>。网络模式下它什么都不做。</td></tr>
+<tr><td><code>stage</code></td><td>只摆放不启动：把你的 mod + <code>brush-api</code> 摆进 S1 的 <code>run/brush-mods/</code>。</td></tr>
+<tr><td><code>runClient</code></td><td><b>S1</b>：重置 <code>run/brush-mods/</code> 并摆入「你的 mod + brush-api」，以 <code>org.abstruck.brush.launch.Brush</code> 拉起 vanilla + Brush。</td></tr>
+<tr><td><code>runFabricClient</code></td><td><b>S2</b>：重置 <code>run/fabric/brush-mods/</code>，由 <code>FabricHostHarness</code> 装配并拉起 Knot + Fabric Loader。</td></tr>
+<tr><td><code>installNeoForge</code></td><td>把 NeoForge 宿主产物装进缓存（<code>--install-only</code>）—— <b>S3 首次运行前跑一次</b>。</td></tr>
+<tr><td><code>runNeoForgeClient</code></td><td><b>S3</b>：重置 <code>run/neoforge/brush-mods/</code>，由 <code>NeoForgeHostHarness</code> 装配并拉起 FML。</td></tr>
+</tbody>
+</table>
+
+<div class="ok"><b>运行 = 当前代码。</b>三个 <code>run*</code> 都会先清空对应实例的 <code>brush-mods/</code>，再摆入「你的 mod + <code>brush-api</code>」，所以改完代码<b>直接再跑一次</b>即可 —— 不存在"陈年 jar 干扰"，也没有单独的清空命令。只想摆放不启动：<code>gradlew.bat stage</code>。</div>
+
+<dl class="kv">
+<dt><code>-Pbrush.useLocalJars=</code></dt><dd>传 <code>true</code> ⇒ <b>离线模式</b>：不再从网络取坐标，改用你自己放进 <code>libs/</code> 的三份 jar。不传 = 默认网络模式（JitPack）。</dd>
+<dt><code>-PbrushVersion=</code></dt><dd>加载器坐标的版本（默认 <code>26.10.1</code>）：<code>com.github.Abstruck-Studio:Brush:&lt;版本&gt;</code>。</dd>
+<dt><code>-PbrushApiVersion=</code></dt><dd>能力库坐标的版本（默认 <code>1.0.0</code>）：<code>com.github.Abstruck-Studio:Brush-API:&lt;版本&gt;</code>。</dd>
+<dt><code>-PbrushCoreJar=</code> / <code>-PbrushApiJar=</code></dt><dd>本地模式下显式指定加载器 / 能力库 jar 的路径。</dd>
+<dt><code>-Pbrush.vanillaJar=</code></dt><dd>指定 vanilla 客户端 jar；默认 = 用户级 Gradle 缓存里的 <code>&lt;gradle 用户目录&gt;/caches/brush/26.1.2/26.1.2.jar</code>。</dd>
+<dt><code>-Pbrush.cache=</code></dt><dd>指定 MC 缓存目录；默认 = <code>&lt;gradle 用户目录&gt;/caches/brush/cache</code>。</dd>
+<dt><code>-Pbrush.autoBootstrap=</code></dt><dd>传 <code>false</code> 关掉"构建期自动跑 <code>metadata</code>"；缺件仍以可读失败拦下。</dd>
+<dt><code>-Pbrush.neoforgeInstaller=</code></dt><dd>指定<b>本地 NeoForge 安装器 jar</b>：<code>installNeoForge</code> / <code>runNeoForgeClient</code> 会用它，跳过联网下载。不传时按"<code>&lt;缓存&gt;/neoforge/</code> → <code>libs/</code>"自动发现。</dd>
+</dl>
+
+<p>缺件不要猜：<code>verifyInputs</code> 会把"缺哪个 jar、怎么补"写在异常里；本地模式下的 <code>verifyLocalJars</code> 同理。</p>
+
+<h2>三、S1 / S2 / S3：一个 jar 跑三种运行时</h2>
+
+<p><b>你的 mod 只编译一次</b>，同一份字节码三个运行时通用 —— 26.1 起游戏未混淆，三个运行时的类名与方法名完全一致，因此不需要重映射、不需要 <code>refmap</code>、也不需要写平台分支。</p>
+
+<div class="ok"><b>三种运行时都能在 MDK 里直接跑</b> —— 宿主 harness 来自加载器坐标的 <code>tools</code> classifier，不需要回到加载器项目。</div>
+
+<table>
+<thead><tr><th>运行时</th><th>命令</th><th>实例目录</th><th>我们的 mod 目录</th><th>谁拉起游戏</th></tr></thead>
+<tbody>
+<tr><td><b>S1</b> 纯 Brush</td><td><code>gradlew.bat runClient</code></td><td>项目根 <code>run/</code></td><td><code>run/brush-mods/</code></td><td>加载器自身（<code>org.abstruck.brush.launch.Brush</code>）</td></tr>
+<tr><td><b>S2</b> Fabric 宿主</td><td><code>gradlew.bat runFabricClient</code></td><td>项目根 <code>run/fabric/</code></td><td><code>run/fabric/brush-mods/</code></td><td><code>FabricHostHarness</code> 装配后拉起 Knot</td></tr>
+<tr><td><b>S3</b> NeoForge 宿主</td><td><code>gradlew.bat installNeoForge</code>→ <code>gradlew.bat runNeoForgeClient</code></td><td>项目根 <code>run/neoforge/</code></td><td><code>run/neoforge/brush-mods/</code></td><td><code>NeoForgeHostHarness</code> 装配后拉起 FML</td></tr>
+</tbody>
+</table>
+
+<div class="note"><b>S3 首次要装宿主产物：</b>先跑一次 <code>gradlew.bat installNeoForge</code>。离线首装可以传本地安装器：<code>-Pbrush.neoforgeInstaller=&lt;本地安装器 jar&gt;</code>；不传则按「<code>&lt;缓存&gt;/neoforge/</code> → <code>libs/</code>」自动发现。</div>
+
+<p><b>MDK 是自包含的</b>：整个文件夹拷到别的设备，<code>jar</code> → 三个 <code>run*</code> 都能跑。想完全离线就传 <code>-Pbrush.useLocalJars=true</code> 并自备 <code>libs/</code> 三份 jar。三个 <code>run*</code> 都会先把对应实例的 <code>brush-mods/</code> 清空，再摆入「你的 mod + <code>brush-api</code>」—— 所以运行的就是你当前的产物。</p>
+
+<p>我们的 mod 放独立目录（<code>brush-mods/</code>）而不是宿主的 <code>mods/</code>，是刻意的<b>项目纪律</b>：宿主加载器会扫它自己的 <code>mods/</code>，对我们的 mod可能告警或误解析；反向我们也可能误扫宿主的 mod。双向隔离成本很低。</p>
+
+<h2>四、元数据：brush.mod.json</h2>
+
+<p>加载器按 jar 内 <b>根目录的 <code>brush.mod.json</code></b> 识别 mod。MDK 模板里的真实文件如下：</p>
+
+<pre><code>{
+  "id": "mdkexample",
+  "name": "MDK Example Mod",
+  "version": "1.0.0",
+  "description": "Brush MDK 示例 mod：在内容注册窗口注册物品 mdkexample:wand，并在初始化期打一条日志。把本项目的 id / 入口类 / 内容改造成你自己的 mod 即可。",
+  "authors": [
+    "&lt;你的名字&gt;"
+  ],
+  "entrypoints": {
+    "main": [
+      "com.example.mdk.ExampleMod"
+    ]
+  }
+}</code></pre>
+
+<p>字段语义：</p>
+
+<dl class="kv">
+<dt><code>id</code></dt><dd>模组唯一标识，小写字母开头，允许 <code>[a-z0-9_.-]</code>；同时是你的资源命名空间。</dd>
+<dt><code>name</code></dt><dd>展示名，可选；缺省时报告回退用 id。</dd>
+<dt><code>version</code></dt><dd>点分纯数字版本；依赖解析的比对对象。</dd>
+<dt><code>entrypoints.main</code></dt><dd><b>必需</b>：入口类全名列表，每类须为 public 具体类 + public 无参构造器 + 实现 <code>BrushModInitializer</code>。</dd>
+<dt><code>entrypoints.client</code></dt><dd>可选：实现 <code>BrushClientModInitializer</code> 的类，只在客户端时机被加载——<b>可以安全引用客户端类型</b>。</dd>
+<dt><code>entrypoints.server</code></dt><dd>可选：实现 <code>BrushDedicatedServerModInitializer</code>。<b>当前只被校验、不被派发</b>，自检报告以 <code>entrypoints.server: declared=N</code> 如实列出。</dd>
+</dl>
+
+<p>其余可选字段：<code>description</code>、<code>authors</code>、<code>icon</code>、<code>mixins</code>、<code>depends</code>、<code>breaks</code>、<code>conflicts</code>（WARN）、<code>recommends</code>（WARN）、<code>suggests</code>、<code>provides</code>、<code>jars</code>。</p>
+
+<h2>五、入口类：完整示例与逐行解释</h2>
+
+<p>MDK 示例 mod 项目的入口类 <code>ExampleMod.java</code> 正文贴在这里：</p>
+
+<pre><code>package com.example.mdk;
+
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.item.Item;
+import org.abstruck.brush.api.BrushEvents;
+import org.abstruck.brush.api.BrushModInitializer;
+import org.abstruck.brush.api.BrushRegistry;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+public final class ExampleMod implements BrushModInitializer {
+
+    private static final Logger LOGGER = LogManager.getLogger("mdkexample");
+
+    /** 你的 mod id（须与 brush.mod.json 的 id 一致，也用作资源命名空间）。 */
+    public static final String MOD_ID = "mdkexample";
+
+    /** 示例物品 id：mdkexample:wand。 */
+    public static final Identifier WAND = Identifier.fromNamespaceAndPath(MOD_ID, "wand");
+
+    @Override
+    public void onInitialize() {
+        LOGGER.info("[mdkexample] onInitialize -- 游戏尚未就绪，这里只注册监听器");
+
+        // 内容注册：窗口到达时才真正执行（监听器体内）
+        BrushEvents.CONTENT_REGISTRATION.register(event -&gt;
+                BrushRegistry.registerItem(WAND, new Item.Properties()));
+
+        // 想再加生命周期行为？例如每帧 tick：
+        // BrushEvents.CLIENT_TICK.register(event -&gt; { ... });   // 热路径：注意节流（勿每帧打日志）
+        // 其它可用事件见 org.abstruck.brush.api.BrushEvents 的字段表。
+    }
+}</code></pre>
+
+<p class="muted">上段与 MDK 的 <code>ExampleMod.java</code> 正文逐字一致，便于你直接对照修改。</p>
+
+<p>逐点解释：</p>
+
+<ol>
+<li><b><code>public final class ... implements BrushModInitializer</code></b>：入口契约三件套 —— public 具体类、public 无参构造器、实现该接口。不实现接口的主入口类 = <b>加载失败</b>。<code>final</code> 不是要求，只是习惯。</li>
+<li><b><code>onInitialize()</code> 的时机</b>：Brush 在 <code>bootstrap.early</code> 锚点构造入口实例并调用它 —— 早于 <code>Main.main</code>、早于内容注册窗口、早于一切游戏生命周期事件，S1/S2/S3 一致（<code>BrushModInitializer</code> javadoc）。所以这里是"<b>注册期</b>"，<b>不得假定任何游戏状态已就绪</b>。</li>
+<li><b><code>MOD_ID</code> / <code>WAND</code></b>：<code>Identifier.fromNamespaceAndPath(ns, path)</code> 是 26.1 起 <code>ResourceLocation</code> 更名后的官方 API。id 必须与元数据 <code>id</code> 一致，否则资源命名空间与归账归属对不上。</li>
+<li><b><code>BrushEvents.CONTENT_REGISTRATION.register(...)</code></b>：这里<b>只注册监听器</b>。注册动作只触碰 L1 派发表，不解析任何 MC 类型 —— 所以入口构造期调用是安全且规定的用法（<code>Event#register</code> javadoc）。</li>
+<li><b><code>BrushRegistry.registerItem(...)</code> 在 lambda 体内</b>：这才是真正碰注册表的一步，它在<b>窗口到达时</b>才执行。这就是"<b>声明与执行分离</b>"：声明在引导期，执行在窗口内。</li>
+</ol>
+
+<div class="warn"><b>为什么初始化期不能碰注册表。</b>vanilla 有一对硬守卫把注册夹在中间：更早触碰注册表类会被抛 <code>IllegalArgumentException: Not bootstrapped (called from registry ...)</code>；更晚注册会被抛 <code>IllegalStateException: Registry is already frozen</code>。唯一合法窗口在 <code>Bootstrap.bootStrap()</code> 执行流内部，外部代码不可达 —— 因此只能经 <code>BrushEvents.CONTENT_REGISTRATION</code> 进窗口。Brush 把这个窗口以 L2 事件的形式交给你，细节见 <a href="content.html">内容注册</a>。</div>
+
+<h2>六、编译面与依赖</h2>
+
+<p>你的<b>编译面 = 两个 jar 里的 <code>org.abstruck.brush.api.**</code></b>：加载器 jar 与能力库 jar 一起进 <code>compileOnly</code>，javac 同时看两边，所以你不用关心某个类具体住在哪个 jar 里。</p>
+
+<div class="warn"><code>org.abstruck.brush.api.impl</code> 是能力库的<b>内部实现</b>：<b>不要依赖它</b>。它随加载器版本变动，不属于契约；需要平台差异时用契约面里的 <code>BrushExpectPlatform</code>。</div>
+
+<table>
+<thead><tr><th>依赖（全部 <code>compileOnly</code>）</th><th>用途</th><th>来源与许可</th></tr></thead>
+<tbody>
+<tr><td><code>files(vanillaJar)</code></td><td>MC 类型（<code>Identifier</code> / <code>Item</code> / <code>Block</code>…）</td><td>用户级 Gradle 缓存里的 <code>&lt;gradle 用户目录&gt;/caches/brush/26.1.2/26.1.2.jar</code>，由构建期自动触发的 <code>metadata</code> 获取</td></tr>
+<tr><td><code>files(apiJar)</code> + <code>files(coreJar)</code></td><td>Brush 作者契约面（<code>org.abstruck.brush.api.**</code>）</td><td>默认来自 JitPack 坐标 <code>com.github.Abstruck-Studio:Brush-API</code> 与 <code>:Brush</code>；离线模式（<code>-Pbrush.useLocalJars=true</code>）下是 <code>libs/brush-api.jar</code> 与 <code>libs/Brush-&lt;版本&gt;.jar</code></td></tr>
+<tr><td><code>com.mojang:datafixerupper:9.0.19</code></td><td><code>Registry</code> 等类型的父接口链（<code>Keyable</code>）</td><td>libraries.minecraft.net，MIT</td></tr>
+<tr><td><code>com.mojang:brigadier:1.3.10</code></td><td><code>Component</code> 的类型链</td><td>libraries.minecraft.net，MIT</td></tr>
+<tr><td><code>io.netty:netty-buffer:4.2.7.Final</code></td><td>自定义网络载荷里 <code>ByteBuf</code> 的父类型</td><td>Maven Central，Apache-2.0</td></tr>
+<tr><td><code>org.apache.logging.log4j:log4j-api:2.22.1</code></td><td>日志；运行时由游戏提供</td><td>Maven Central，Apache-2.0</td></tr>
+<tr><td><code>sponge-mixin</code> / <code>mixinextras-common</code></td><td>要写 mixin 时打开这两行</td><td>FabricMC maven（MIT）/ Maven Central（MIT）</td></tr>
+</tbody>
+</table>
+
+<p class="muted">项目里的 <code>bootstrapRuntime</code>（加载器 jar + gson / log4j）与 <code>brushRuntime</code> 是<b>运行装置</b>，harness 是 S2 / S3 的 harness —— 三者都不是你的依赖面，别往自己的 mod 里抄。</p>
+
+<p><b>要写 mixin：</b>打开那两行依赖，在资源目录（<code>resources/</code>）下加 <code>yourmod.mixins.json</code>，并在 <code>brush.mod.json</code> 里声明 <code>"mixins": { "brush": ["yourmod.mixins.json"], "fabric": ["yourmod.mixins.json"] }</code>。目标名用<b>官方名</b>，<b>不要写 <code>refmap</code></b>（S3 下写了会坏）。</p>
+
+<h2>七、如何确认加载成功</h2>
+
+<p>加载成功后，游戏日志里有这几行。注意三个 <code>run*</code> 都会把能力库一起摆进去，所以 <b>mod 数是 2</b>。S1 实测：</p>
+
+<pre><code>[brush] --- mod loading (P3) ---
+[brush] mod dir: ...\run\brush-mods (2 jar(s))
+[brush]   loaded: brush-api 1.0.0 entry=org.abstruck.brush.api.impl.BrushApiMod
+[brush]   loaded: mdkexample 1.0.0 entry=com.example.mdk.ExampleMod
+[brush] mod loading complete -- mods: 2 loaded (brush-api 1.0.0, mdkexample 1.0.0)
+[brush] (loader version 26.10.1, game version 26.1.2)</code></pre>
+
+<p>同一份 jar 在 <b>S2</b>下的实测输出：</p>
+
+<pre><code>[brush] S2 ready: hooks installed, brush-mods loaded
+[brush] host mods: brush@26.10.1, fabric-api@0.155.3+26.1.2, fabricloader@0.19.5, minecraft@26.1.2, modmenu@18.0.2, sodium@0.9.2+mc26.1.2 ...
+[brush] mod loading complete -- mods: 2 loaded (brush-api 1.0.0, mdkexample 1.0.0)
+:: 资源重载日志里还会出现 brush_mods 资源包</code></pre>
+
+<p class="muted"><code>host mods:</code> 一行是宿主侧的已加载清单：它同时列出 <code>brush@…</code> 与宿主自己的 mod（<code>fabric-api</code> / <code>sodium</code> …）—— 这就是"我们的 mod 与宿主生态 mod 在同一 JVM 共存"的可见证据。</p>
+
+<dl class="kv">
+<dt><code>loaded: &lt;id&gt; &lt;version&gt; entry=&lt;类名&gt;</code></dt><dd>逐 mod 一行：id、版本、<b>被实例化的入口类</b>。这一行出现 = 元数据被解析、入口类被构造过。</dd>
+<dt><code>mod loading complete -- mods: N loaded (...)</code></dt><dd>汇总行，括号里是 <code>id 版本</code> 列表。N 就是本次加载的 mod 数 —— 三个运行时下正常都是 2。</dd>
+<dt><code>order:</code></dt><dd>依赖拓扑序，另一行输出；出问题先看它是否符合预期。</dd>
+</dl>
+
+<p>如果加载失败，输出是<b>一次列全的问题清单</b>、并且<b>一个 mod 都不实例化</b>：</p>
+
+<pre><code>[brush] MOD LOADING FAILED -- 2 problem(s) (...\run\brush-mods, 3 jar(s)):
+[brush]   - bad-nojson.jar: missing mod.json at jar root (only Brush mods belong in brush-mods/; ...)
+[brush]   - mod 'brush.example.baddep' requires 'brush' &gt;=99.0.0, found 26.10.1
+[brush] no mods were instantiated; aborting launch before the game starts</code></pre>
+
+<h2>八、调试建议</h2>
+
+<ul>
+<li><b>先读日志，再猜代码。</b>当次运行的控制台与游戏侧 <code>run/logs/latest.log</code> 是唯一证据源；轮转后的历史在 <code>run/logs/*.log.gz</code>，别只盯着 <code>latest.log</code> 的尾部窗口。</li>
+<li><b>mod 没进去？</b>先确认 <code>mod dir:</code> 是你以为的目录、<code>(N jar(s))</code> 数目对：S1 是 <code>run/brush-mods</code>，S2 是 <code>run/fabric/brush-mods</code>，S3 是 <code>run/neoforge/brush-mods</code>。</li>
+<li><b>"改了代码没变化"</b>：三个 <code>run*</code> 都会先清空对应实例的 <code>brush-mods/</code> 再摆当前产物，正常不会残留旧 jar。若你手工往那些目录放过别的 jar，会被清掉 —— 要保留多个 jar，就改 <code>build.gradle</code> 里对应的那几行。</li>
+<li><b>IDEA 里 mixin 的 <code>method = "run()V"</code> 报红可忽略</b>：这是 Minecraft Development 插件在无映射配置的手写构建下无法解析 mixin 目标所致，<b>运行时不受影响</b>。</li>
+<li><b>缺件不要手工拼错误信息</b>：<code>verifyInputs</code> 已经把"缺什么、怎么补"写在异常里。</li>
+<li><b>磁盘与离线复用</b>：MC 侧文件都在<b>用户级 Gradle 缓存</b>里 —— 客户端 jar 约 38 MB（<code>&lt;gradle 用户目录&gt;/caches/brush/26.1.2/</code>），库 / natives / 资产约 600 MB；本机把 <code>GRADLE_USER_HOME</code> 设在非默认位置，默认机器上就是 <code>~/.gradle</code>。加载器 / 能力库 / 本示例项目默认共享这一份，所以已经下过就<b>零下载</b>命中。要复用别处的下载或换落点，用 <code>-Pbrush.cache=</code> / <code>-Pbrush.vanillaJar=</code> 指过去。</li>
+<li><b>用到网络 / 创造栏 / HUD 与输入时</b>：这些能力住在能力库 <code>brush-api</code> 里。三个 <code>run*</code> 与 <code>stage</code> 都会把它一起摆进对应实例的 <code>brush-mods/</code>，正常不需要你手工处理；只有当你自己手工搭运行目录而漏了它时，<code>BrushNetwork</code> 才会给出"库模组未安装"的可读异常。</li>
+</ul>
+
+<p>下一步：<a href="content.html">内容注册</a>、<a href="network.html">网络</a>、<a href="overview.html">契约面与设计原则</a>；加载器侧的行为见 <a href="../brush/mods.html">模组加载</a> 与 <a href="../brush/build.html">构建、产物与命令</a>。</p>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

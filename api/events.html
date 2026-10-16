@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>事件总表 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>事件总表</h1>
+<p class="lead">本页是工具页：把 <code>BrushEvents</code> 的<b>全部 16 个事件字段</b>做成一张表，并补充
+<code>Event&lt;T&gt;</code> 与 <code>EventRegistration</code> 的用法、
+L1 hook 与 L2 语义事件的分层，以及「注册时机」通则。</p>
+
+<h2>1. 全部事件字段（16 个，以源码为准）</h2>
+
+<p class="muted">表内「线程」列写的是<b>事件被派发时所在的线程</b>。S2 / S3 下宿主可能改变
+bootstrap 类事件的执行线程（S1 = 游戏主线程），已在表中标注。
+「三运行时」列的一致性指的是<b>事件点与语义</b>，运行时差异另在 §5 单列。</p>
+
+<table>
+<tr>
+<th>事件常量</th><th>监听器类型</th><th>触发时机</th><th>线程</th><th>典型用途</th><th>三运行时</th>
+</tr>
+
+<tr>
+<td><code>CONTENT_REGISTRATION</code></td>
+<td><code>ContentRegistrationEvent.Listener</code><br>
+<code>onContentRegistration(ContentRegistrationEvent)</code></td>
+<td><code>BuiltInRegistries#bootStrap()</code> HEAD —— 守卫已放行、注册表未冻结。
+<b>注册内容的唯一合法窗口</b>；每进程恰 1 次</td>
+<td>执行 bootstrap 的线程<br><span class="muted">S1 = 主线程；S3 = 宿主 bootstrap 线程</span></td>
+<td>经 <code>BrushRegistry</code> 注册物品 / 方块 / 实体 / 菜单等；登记数据包注册表</td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>CLIENT_REGISTRATION</code></td>
+<td><code>ClientRegistrationEvent.Listener</code><br>
+<code>onClientRegistration(ClientRegistrationEvent)</code></td>
+<td><code>BuiltInRegistries#bootStrap()</code> TAIL —— vanilla 内容注册完成之后、
+<code>Minecraft</code> 构造之前；每进程恰 1 次</td>
+<td>执行 bootstrap 的线程</td>
+<td>最后一批客户端注册。触发前缓冲注册已统一落地</td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>PACKS_REGISTERED</code></td>
+<td><code>ResourcePacksRegisteredEvent.Listener</code><br>
+<code>onPacksRegistered(ResourcePacksRegisteredEvent)</code></td>
+<td><code>PackRepository#&lt;init&gt;</code> RETURN —— 每个仓库实例构造完成时
+</td>
+<td>构造该仓库的线程<br><span class="muted">客户端主仓库 = 游戏主线程</span></td>
+<td>确认资源栈已接入来源集合；做与包状态相关的初始化 / 诊断</td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>SCREEN_INIT</code></td>
+<td><code>ScreenInitEvent.Listener</code><br>
+<code>onScreenInit(Screen)</code></td>
+<td><code>Screen#init(int,int)</code> TAIL —— widget 就绪。<b>对所有屏幕派发</b>，类型过滤是监听器职责</td>
+<td>游戏主线程</td>
+<td>往标题界面加自己的按钮；按屏幕类型挂载自定义控件</td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>SCREEN_RESIZE</code></td>
+<td><code>ScreenResizeEvent.Listener</code><br>
+<code>onScreenResize(Screen)</code></td>
+<td><code>Screen#resize(int,int)</code> TAIL —— 窗口缩放完成，widget 已按新尺寸先清后建完毕。
+非热路径但<b>可突发</b></td>
+<td>游戏主线程</td>
+<td>缩放后重排 / 重挂自定义控件</td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>CLIENT_READY</code></td>
+<td><code>ClientReadyEvent.Listener</code><br>
+<code>onClientReady(ClientReadyEvent)</code></td>
+<td><code>Minecraft#run()</code> HEAD —— 构造器已完成、主循环尚未推进；
+资源加载与主菜单在其后。每进程恰 1 次</td>
+<td>游戏主线程</td>
+<td>「客户端起来了」的起点：做一次性的客户端侧初始化</td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>CLIENT_TICK</code></td>
+<td><code>ClientTickEvent.Listener</code><br>
+<code>onClientTick(ClientTickEvent)</code></td>
+<td><code>Minecraft#tick()</code> HEAD —— 每帧 tick 起始。<b>热路径</b>（约 20 次/秒）</td>
+<td>游戏主线程</td>
+<td>每帧轮询、状态机推进。须保持轻量</td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>CLIENT_STOPPING</code></td>
+<td><code>ClientStoppingEvent.Listener</code><br>
+<code>onClientStopping(ClientStoppingEvent)</code></td>
+<td><b>JVM shutdown hook</b>—— 正常退窗 / <code>System.exit</code>
+均触发；<b>仅当 <code>CLIENT_READY</code> 已触发过</b>时派发。
+强杀与 <code>Runtime.halt</code> <b>不触发</b></td>
+<td><b>JVM 关闭线程</b></td>
+<td>轻量清理：刷盘 / 写配置 / 留关闭期证据</td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>HUD_EXTRACT</code></td>
+<td><code>HudExtractEvent.Listener</code><br>
+<code>onHudExtract(GuiGraphicsExtractor, DeltaTracker)</code></td>
+<td><code>Gui#extractRenderState</code> TAIL —— vanilla HUD 元素已全部写入 extractor，可继续追加绘制。
+每渲染帧 1 次；<b>热路径</b>（约 60–260 次/秒）</td>
+<td>渲染线程</td>
+<td>HUD 叠加绘制。无监听器时加载侧零开销</td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>INPUT_KEY_PRESS</code></td>
+<td><code>KeyPressEvent.Listener</code><br>
+<code>onKeyPress(InputAction, int key, int scancode, int modifiers)</code></td>
+<td><code>KeyboardHandler#keyPress</code> HEAD —— 每次按键回调。
+HEAD 先于方法头部的窗口句柄守卫</td>
+<td>游戏主线程</td>
+<td>原始键回调：感知扫描码 / 修饰键、实现不该占用键位的快捷键</td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>INPUT_MOUSE_BUTTON</code></td>
+<td><code>MouseButtonEvent.Listener</code><br>
+<code>onMouseButton(InputAction, int button, int modifiers)</code></td>
+<td><code>MouseHandler#onButton</code> HEAD —— 每次鼠标按键回调</td>
+<td>游戏主线程</td>
+<td>鼠标键原始回调</td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>INPUT_MOUSE_SCROLL</code></td>
+<td><code>MouseScrollEvent.Listener</code><br>
+<code>onMouseScroll(double xOffset, double yOffset)</code></td>
+<td><code>MouseHandler#onScroll</code> HEAD —— 每次滚轮回调</td>
+<td>游戏主线程</td>
+<td>滚轮交互。载荷是<b>选项处理之前</b>的原始增量</td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>NETWORK_PAYLOAD</code></td>
+<td><code>NetworkPayloadEvent.Listener</code><br>
+<code>onNetworkPayload(Identifier channel, byte[] data)</code></td>
+<td><code>ClientCommonPacketListenerImpl#handleCustomPayload</code> HEAD —— 客户端收到一个
+<b>已注册通道</b>的本生态载荷包时</td>
+<td>处理该包的线程<br><span class="muted">视 vanilla 包调度而定；需触碰客户端状态时自行切回主线程</span></td>
+<td>接收服务器 → 客户端的自定义载荷</td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>SERVER_PAYLOAD</code></td>
+<td><code>ServerPayloadEvent.Listener</code><br>
+<code>onServerPayload(ServerPayloadEvent.Reply, Identifier, byte[])</code></td>
+<td><code>ServerGamePacketListenerImpl#handleCustomPayload</code> HEAD —— 服务端收到本生态载荷包时</td>
+<td>服务端网络线程</td>
+<td>双向网络的服务端侧：经 <code>Reply</code> 句柄回包</td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>DATA_LOADED</code></td>
+<td><code>DataLoadedEvent.Listener</code><br>
+<code>onDataLoaded(MinecraftServer server)</code></td>
+<td><code>MinecraftServer#&lt;init&gt;</code> RETURN —— 集成服务器构造完成。每服务器实例一次；<b>装载先于派发</b></td>
+<td>服务器构造线程</td>
+<td>读取自定义数据包注册表的最新视图 / 重建缓存。<b>重活不要放这里</b></td>
+<td>一致</td>
+</tr>
+
+<tr>
+<td><code>DATA_RELOADED</code></td>
+<td><code>DataReloadedEvent.Listener</code><br>
+<code>onDataReloaded(MinecraftServer, Optional&lt;Throwable&gt; error)</code></td>
+<td><code>MinecraftServer#reloadResources</code> 整方法包装——
+<code>/reload</code> / 数据包变更的重载 <b>future 完成</b>时</td>
+<td><b>重载 future 的完成线程</b></td>
+<td>按新视图重建缓存。<b>不得</b>触碰屏幕 / 渲染 / 未同步的游戏状态；失败按 <code>error</code> 降级</td>
+<td>一致</td>
+</tr>
+</table>
+
+<div class="note">
+<strong>字段计数与核对方法。</strong> 上表 = <code>BrushEvents</code> 的<b>全部 16 个</b>
+<code>public static final Event&lt;…&gt;</code> 字段，一个不漏。核对方式：对
+<code>BrushEvents</code> 源码执行 <code>grep "^    public static final Event"</code> —— 恰好 16 行
+（源码行 44 / 52 / 57 / 62 / 67 / 72 / 77 / 82 / 87 / 93 / 102 / 111 / 116 / 128 / 134 / 143）。
+
+</div>
+
+<h2>2. <code>Event&lt;T&gt;</code> 与 <code>EventRegistration</code></h2>
+
+<h3>2.1 <code>Event&lt;T&gt;</code></h3>
+
+<table>
+<tr><th>项</th><th>契约（源码 javadoc）</th></tr>
+<tr><td>实例从哪来</td><td>只能由 Brush 自身创建：<code>BrushEvents</code> 的静态字段与
+<code>BrushCreativeTabs</code>—— 对 mod 而言事件是<b>封闭集合</b>，你拿不到也造不出别的事件</td></tr>
+<tr><td>注册方法</td><td><code>public EventRegistration register(T listener)</code>；
+<code>listener</code> 为 null 抛 <code>NullPointerException</code></td></tr>
+<tr><td>注册线程</td><td><b>线程安全，可在任意线程</b> —— 含 mod 入口类构造期。
+注册只触碰 L1 派发表，<b>不解析任何 MC 类型</b></td></tr>
+<tr><td><b>是否允许重复注册</b></td><td><b>允许。</b> 可链式：同一事件可注册任意多监听器，
+<b>按注册先后调用</b>；一个监听器的异常或注销不影响其他监听器。
+<b>不提供任何独占语义</b></td></tr>
+<tr><td>取消 / 拦截</td><td><b>没有取消机制。</b> <code>Event</code> / 各监听器接口都不带取消位 ——
+事件是「通知」语义，不是「拦截 / 改写」语义</td></tr>
+<tr><td>调用线程</td><td>监听器在<b>事件触发线程</b>上被调用</td></tr>
+<tr><td><b>异常传播</b></td><td><b>不吞异常。</b> 监听器抛出的异常被派发器包装为
+<code>IllegalStateException</code> 并<b>立即上抛</b> ——
+快速失败，绝不让 hook 错误静默消失</td></tr>
+<tr><td>不暴露的东西</td><td>L2 不暴露 order，也没有「按 order 排序」的 L2 API ——
+保证的只有「按注册序派发」</td></tr>
+</table>
+
+<h3>2.2 <code>EventRegistration</code></h3>
+
+<table>
+<tr><th>成员</th><th>语义</th></tr>
+<tr><td><code>public void unregister()</code></td><td>注销该监听器。<b>幂等</b>：重复调用无副作用</td></tr>
+<tr><td><code>public boolean isActive()</code></td><td>该监听器当前是否仍会被派发；注销后恒为 <code>false</code></td></tr>
+<tr><td><code>public void close()</code></td><td>等价于 <code>unregister()</code></td></tr>
+</table>
+
+<div class="note">
+<strong>L2 契约「宁小勿全」。</strong> 通过 <code>EventRegistration</code> 暴露的能力只有「注销」——
+注册顺序与开关属内部实现，需要时再按真实需求开放。也就是说：
+你拿不到「临时关闭再打开」的开关，只能注销。需要这种语义时请自己在监听器对象里持一个 boolean。
+</div>
+
+<pre><code>import org.abstruck.brush.api.BrushEvents;
+import org.abstruck.brush.api.EventRegistration;
+
+EventRegistration registration = BrushEvents.CLIENT_TICK.register(event -&gt; {
+    // 每帧
+});
+
+registration.unregister();     // 幂等
+boolean active = registration.isActive();   // false
+
+// 或者用 try-with-resources（退出块即注销）
+try (EventRegistration scoped = BrushEvents.SCREEN_INIT.register(screen -&gt; { })) {
+    // ...
+}
+</code></pre>
+
+<h2>3. 事件命名与分层：L1 hook 与 L2 语义</h2>
+
+<p><b>一句话</b>：L1（<code>transform.HookEvents</code>）是<b>注入点的内部事件 id</b>，可随版本调整、
+是加载器自己的实现细节；L2（<code>BrushEvents</code>）是<b>对 mod 的稳定语义契约</b>，
+mod 只依赖 L2。</p>
+
+<table>
+<tr><th></th><th>L1 · <code>HookEvents</code></th><th>L2 · <code>BrushEvents</code></th></tr>
+<tr><td>形态</td><td><code>HookEvent</code> 强类型 key</td>
+<td><code>Event&lt;XxxListener&gt;</code> 类型化句柄</td></tr>
+<tr><td>角色</td><td>注入点与派发表之间的内部标识；<b>拼错在编译期即失败</b></td>
+<td>mod 唯一合法注册入口；载荷类型安全</td></tr>
+<tr><td>稳定性</td><td>内部标识，可随版本调整</td><td>对外契约，尽量稳定</td></tr>
+<tr><td>数量</td><td>17 个 id 常量</td>
+<td>16 个事件字段</td></tr>
+<tr><td>桥接</td><td>每个 L2 字段构造时绑定一个 L1 id + 一个 bridge 函数</td>
+<td>注册最终落到同一张 L1 派发表上 —— 引擎只有一张，L2 是类型化包装</td></tr>
+</table>
+
+<p class="muted">出处：<code>HookEvents</code> javadoc、
+<code>Event</code> javadoc、设计文档记载。</p>
+
+<h2>4. 注册时机通则</h2>
+
+<ol>
+<li><b>注册监听器的地方</b> = <code>BrushModInitializer#onInitialize()</code>
+或 <code>BrushClientModInitializer#onInitializeClient()</code>。
+两者都在游戏就绪之前执行，注册动作本身安全。
+客户端入口注册的 <code>CLIENT_READY</code> 监听器<b>同批送达</b>。</li>
+<li><b>内容注册必须在监听器体内。</b> 物品 / 方块 / 实体等内容注册只能写在
+<code>CONTENT_REGISTRATION</code> 的监听器体内——
+窗口外调用会被 vanilla 守卫拒绝或 <code>freeze</code> 挡住，<code>BrushRegistry</code> 会把它包装成带指引的可读异常。
+数据包注册表（<code>BrushDataRegistries</code>）不受这个窗口约束，但<b>bootstrap 期同样不得调用</b>。</li>
+<li><b>「注册监听器」与「注册内容」是两件事</b>：前者在初始化期，后者在监听器体内。把两者混在一处是新手最常见的错误。</li>
+</ol>
+
+<pre><code>import org.abstruck.brush.api.BrushEvents;
+import org.abstruck.brush.api.BrushModInitializer;
+
+public final class MyMod implements BrushModInitializer {
+
+    @Override
+    public void onInitialize() {
+        // ① 注册监听器 —— 此刻游戏未就绪，这是「注册期」
+        BrushEvents.CLIENT_TICK.register(event -&gt; { /* ... */ });
+
+        // ② 注册内容 —— 必须推迟到窗口到达（监听器体内）
+        BrushEvents.CONTENT_REGISTRATION.register(event -&gt; {
+            // BrushRegistry.registerItem(...) 等等
+        });
+    }
+}
+</code></pre>
+
+<h2>5. 三运行时一致性的准确说法</h2>
+
+<p>「三运行时一致」在本页指的是：<b>事件点、载荷语义、线程语义由同一份字节码提供，不随宿主变化</b> ——
+S1 / S2 / S3 共用同一份 mixin 配置与同一张派发表。以下是已知的、<b>如实登记的</b>运行时差异：</p>
+
+<table>
+<tr><th>差异</th><th>说明</th></tr>
+<tr><td><code>CONTENT_REGISTRATION</code> / <code>CLIENT_REGISTRATION</code> 的执行线程</td>
+<td>S1 为游戏主线程；S3 为宿主的 bootstrap 线程（实测 <code>pool-9-thread-1</code>）；
+S2 在 <code>Minecraft</code> 构造中途。<b>事件点本身三运行时相同</b>，
+监听器不应假定线程名，只应假定「事件点」。</td></tr>
+<tr><td>S3 的客户端注册 flush 落地点</td>
+<td>事件点（<code>bootStrap</code> TAIL）三运行时一致，但 S3 的<b>落地</b>推迟到首个 <code>PACKS_REGISTERED</code> ——
+原因是宿主自身的内容注册晚于该 TAIL，在 TAIL 处求值属性 Supplier 会因未绑定的 holder 而失败（T3 实测）。</td></tr>
+<tr><td>mod 入口的构造线程</td>
+<td>S1 / S2 为 <code>main</code>，S3 为 <code>modloading-worker-0</code>。与事件派发线程<b>无耦合</b>。</td></tr>
+<tr><td>宿主自省能力</td>
+<td>S2 / S3 下宿主 mixin 服务不汇报「mod mixin 已施加」，台账那行为 <code>n/a</code>；
+该缺口已由<b>行为断言</b>覆盖，不靠自省。</td></tr>
+</table>
+
+<div class="warn">
+<strong>本页不含的两个事件。</strong>
+<code>BrushCreativeTabs.entriesOf(...)</code> 的事件（<code>CreativeTabOutputEvent.Listener</code>）与
+<code>BrushCreativeTab</code> 自有标签页<b>不在</b> <code>BrushEvents</code> 字段表内 ——
+前者按标签页键动态创建、后者是模型对象。两者见 <a href="ui.html">界面与输入</a> §5。
+</div>
+
+<footer>Brush Wiki · 本页依据源码注释与实测证据（Brush 26.10.1 / MC 26.1.2）· 覆盖 BrushEvents 全部 16 个字段、Event / EventRegistration 契约、HookEvents 分层对照</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>

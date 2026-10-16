@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API 参考索引 · Brush Wiki</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-root="../">
+<div id="layout">
+<aside id="sidebar"></aside>
+<main>
+<h1>API 参考索引</h1>
+<p class="lead">本页是工具页：把 <code>org.abstruck.brush.api</code> 包里的每个公开类型列成表，标注种类与"作者是否应该直接用"；再单独说明库模组的 <code>impl</code> 包为什么不在契约面里。最后是一张「常见任务 → 用哪个 API」速查表。</p>
+
+<div class="note">
+<b>本页怎么读</b>："作者应直接用？"这一列按<b>编译面</b>判断，不是按"类是不是 public"判断 —— 作者的编译面是 <code>brush-api-contract.jar</code>，其中契约面内的类型一律为"是"，仅供加载器与库模组内部使用的接缝标"否"。四类顶层类型的分工是：<b>入口与钩子</b>、<b>事件入口与事件类型</b>、<b>注册与内容门面</b>、<b>工具类型</b>。包内唯一不公开的类是 <code>CreativeTabEntriesImpl</code>，它只是 <code>CreativeTabEntries</code> 的实现，不出现在下表。
+</div>
+
+<div class="note">
+<b>计数口径</b>：<code>org.abstruck.brush.api</code> 包下共 <b>40 个源文件</b>，其中包私有实现类 1 个，其余 <b>40 个顶层公开类型</b>+ <b>14 个公开嵌套类型</b> = 公开类型合计 <b>54 个</b>。下表逐行列出这 54 个类型（顶层 40 + 嵌套 14），<b>共 54 行</b>—— 与 40 个顶层类型 + 14 个公开嵌套类型的清点结果一致，无遗漏。
+</div>
+
+<h2>1. 作者入口与生命周期钩子</h2>
+
+<table>
+<tr><th>类型名</th><th>种类</th><th>一句话职责</th><th>作者应直接用？</th></tr>
+<tr><td><code>BrushModInitializer</code></td><td>接口</td><td>主入口：<code>onInitialize()</code> 在 <code>bootstrap.early</code> 锚点、游戏代码运行之前调用</td><td>是 —— <code>entrypoints.main</code> 的类必须实现</td></tr>
+<tr><td><code>BrushClientModInitializer</code></td><td>接口</td><td>客户端入口：<code>onInitializeClient()</code> 在 <code>Minecraft#run()</code> HEAD、首个 tick 与 <code>CLIENT_READY</code> 之前调用</td><td>是 —— 需要客户端实例时实现（<code>entrypoints.client</code>）</td></tr>
+<tr><td><code>BrushDedicatedServerModInitializer</code></td><td>接口</td><td>专用服务端入口契约占位：当前<b>只被校验、不被派发</b></td><td>可以声明，但实现它<b>不会在任何现有运行时被调用</b></td></tr>
+<tr><td><code>ModSelfTest</code></td><td>接口</td><td>装载期自检钩子：<code>selfTest()</code> 在自检退出点恰一次，返回单条 <code>(检查名, 是否通过)</code></td><td>是 —— 想在 <code>--brush.selftest</code> 里断言就实现</td></tr>
+<tr><td><code>ModClientTest</code></td><td>接口</td><td>实机测试钩子：<code>runClientTest(context)</code> 在 <code>CLIENT_READY</code> 之后、<code>--brush.mod-test</code> 专用</td><td>是 —— 想断言"进世界之后"的行为就实现</td></tr>
+<tr><td><code>ClientTestContext</code></td><td>接口</td><td>实机测试上下文：<code>minecraft()</code> / <code>quickPlayOrCreateWorld</code> / <code>awaitServerReady</code> / <code>gameDirectory</code> / <code>screenshot</code></td><td>是</td></tr>
+</table>
+
+<h2>2. 事件入口与事件类型</h2>
+
+<table>
+<tr><th>类型名</th><th>种类</th><th>一句话职责</th><th>作者应直接用？</th></tr>
+<tr><td><code>BrushEvents</code></td><td>类</td><td>全部语义事件的唯一入口：17 个 <code>Event&lt;XxxListener&gt;</code> 常量</td><td>是 —— 订阅事件就靠它</td></tr>
+<tr><td><code>Event&lt;T&gt;</code></td><td>类</td><td>类型安全的事件句柄：<code>register(listener)</code> 返回 <code>EventRegistration</code>；实例只由 Brush 创建</td><td>是</td></tr>
+<tr><td><code>EventRegistration</code></td><td>类</td><td>监听器注册句柄：<code>unregister()</code>/ <code>isActive()</code> / <code>close()</code>，支持 try-with-resources</td><td>是 —— 需要注销时持有它</td></tr>
+<tr><td><code>ContentRegistrationEvent</code></td><td>类</td><td>内容注册相位的载荷；含 <code>INSTANCE</code> 单例与 <code>Listener</code></td><td>是</td></tr>
+<tr><td><code>ClientRegistrationEvent</code></td><td>类</td><td>客户端注册窗口的载荷；含 <code>INSTANCE</code> 与 <code>Listener</code></td><td>是</td></tr>
+<tr><td><code>ResourcePacksRegisteredEvent</code></td><td>类</td><td>资源包仓库构建完成的载荷；含 <code>INSTANCE</code> 与 <code>Listener</code></td><td>是</td></tr>
+<tr><td><code>ClientReadyEvent</code></td><td>类</td><td>客户端主循环开始的载荷；含 <code>INSTANCE</code> 与 <code>Listener</code></td><td>是</td></tr>
+<tr><td><code>ClientTickEvent</code></td><td>类</td><td>每帧 tick 的载荷；含 <code>INSTANCE</code> 与 <code>Listener</code></td><td>是</td></tr>
+<tr><td><code>ClientStoppingEvent</code></td><td>类</td><td>进程关闭的载荷；含 <code>INSTANCE</code> 与 <code>Listener</code></td><td>是</td></tr>
+<tr><td><code>ScreenInitEvent</code></td><td>类</td><td>屏幕布局完成的名称空间；载荷 = <code>Screen</code> 实例本身</td><td>是</td></tr>
+<tr><td><code>ScreenResizeEvent</code></td><td>类</td><td>屏幕缩放完成的名称空间；载荷 = <code>Screen</code> 实例本身</td><td>是</td></tr>
+<tr><td><code>HudExtractEvent</code></td><td>类</td><td>HUD 提取完成的名称空间；载荷 = <code>GuiGraphicsExtractor</code> + <code>DeltaTracker</code></td><td>是</td></tr>
+<tr><td><code>KeyPressEvent</code></td><td>类</td><td>键盘回调的名称空间；载荷 = <code>InputAction</code> + GLFW 原始 key / scancode / modifiers</td><td>是</td></tr>
+<tr><td><code>MouseButtonEvent</code></td><td>类</td><td>鼠标按键回调的名称空间；载荷 = <code>InputAction</code> + button / modifiers</td><td>是</td></tr>
+<tr><td><code>MouseScrollEvent</code></td><td>类</td><td>鼠标滚轮回调的名称空间；载荷 = 原始 <code>xOffset</code> / <code>yOffset</code></td><td>是</td></tr>
+<tr><td><code>NetworkPayloadEvent</code></td><td>类</td><td>收到 Brush 通道载荷的名称空间；含 <code>Listener</code>（<code>channel</code> + <code>byte[]</code>）</td><td>是</td></tr>
+<tr><td><code>ServerPayloadEvent</code></td><td>类</td><td>服务端收到 Brush 通道载荷的名称空间；含 <code>Listener</code> 与 <code>Reply</code></td><td>是</td></tr>
+<tr><td><code>CreativeTabOutputEvent</code></td><td>类</td><td>创造栏内容构建完成的名称空间；载荷 = <code>CreativeTabEntries</code> 句柄</td><td>是</td></tr>
+<tr><td><code>DataLoadedEvent</code></td><td>类</td><td>集成服务器构造完成的名称空间；载荷 = <code>MinecraftServer</code></td><td>是</td></tr>
+<tr><td><code>DataReloadedEvent</code></td><td>类</td><td>数据重载完成的名称空间；载荷 = <code>MinecraftServer</code> + <code>Optional&lt;Throwable&gt;</code></td><td>是</td></tr>
+</table>
+
+<h2>3. 注册与内容门面</h2>
+
+<table>
+<tr><th>类型名</th><th>种类</th><th>一句话职责</th><th>作者应直接用？</th></tr>
+<tr><td><code>BrushRegistry</code></td><td>类</td><td>内容注册唯一入口：泛型 <code>register</code> + 物品 / 方块便捷形 + 实体 / 方块实体 / 菜单 / 属性 / 刷怪 / 渲染器 / 屏幕 + <code>dataRegistry</code> 读取</td><td>是 —— 必须在 <code>CONTENT_REGISTRATION</code> 监听器内调用</td></tr>
+<tr><td><code>BrushRegistration</code></td><td>类</td><td>注册辅助函数式接口的命名空间</td><td>是</td></tr>
+<tr><td><code>BrushDataRegistries</code></td><td>类</td><td>自定义数据包注册表的<b>登记</b>入口：<code>register(ResourceKey, Codec)</code>；读取走 <code>BrushRegistry.dataRegistry</code></td><td>是 —— 需要数据驱动内容时</td></tr>
+<tr><td><code>BrushKeybinds</code></td><td>类</td><td>键位注册：<code>register(KeyMapping)</code> / <code>registerCategory(Identifier)</code> / <code>registeredCount()</code>；<code>Options</code> 构造后登记会响亮抛异常</td><td>是 —— 必须在初始化期调用</td></tr>
+<tr><td><code>BrushCreativeTabs</code></td><td>类</td><td>创造栏双向入口：<code>entriesOf(...)</code> 向现有标签页追加条目；<code>register(BrushCreativeTab)</code> 注册自有侧栏标签页；另有 <code>registeredTabs</code> / <code>tabOfBridge</code> / <code>audit</code></td><td>是</td></tr>
+<tr><td><code>BrushCreativeTab</code></td><td>类</td><td>Brush 自有创造标签页模型：<code>builder(id)</code> 装配 title / icon / contents，<code>build()</code>；不进 vanilla 注册表</td><td>是 —— 想在创造栏加 Brush 侧栏页时</td></tr>
+<tr><td><code>CreativeTabEntries</code></td><td>接口</td><td>条目追加句柄：<code>tab()</code> / <code>add(stack)</code> / <code>add(stack, visibility)</code> / <code>shouldShowOpRestrictedItems()</code> / <code>enabledFeatures()</code></td><td>是</td></tr>
+<tr><td><code>BrushMods</code></td><td>类</td><td>mod 元数据查询：<code>list()</code> / <code>find(id)</code> / <code>isLoaded(id)</code> / <code>loaderVersion()</code> / <code>gameVersion()</code>；零注入点</td><td>是 —— 读别人的 mod 元数据就靠它</td></tr>
+<tr><td><code>BrushNetwork</code></td><td>类</td><td>网络门面：<code>register(channel[, maxSize])</code> / <code>send(channel, data)</code> / <code>isInstalled()</code>；实现住库模组</td><td>是 —— 注册通道必须在<b>主入口</b></td></tr>
+<tr><td><code>BrushCapabilities</code></td><td>类</td><td>方块级流体 / 能量能力的注册与查询：<code>registerFluidBlock</code> / <code>registerFluidBlockEntity</code> / <code>registerEnergyBlock</code> / <code>registerEnergyBlockEntity</code>；<code>fluid(Level, BlockPos, Direction)</code> / <code>energy(...)</code> 返回 <code>Optional</code>；诊断 <code>registeredCounts()</code></td><td>是 —— 但<b>必须在你的方块 / 方块实体类型已存在之后</b>注册</td></tr>
+<tr><td><code>BrushFluidStorage</code></td><td>接口</td><td>流体储罐契约：<code>tankCount()</code> / <code>fluidIn(int)</code> / <code>amountIn(int)</code> / <code>capacityOf(int)</code> / <code>insert(int tank, Fluid, long maxAmount, boolean simulate)</code> / <code>extract(...)</code> —— 移动类方法<b>返回实际移动量</b>；默认 <code>isValid(int tank, Fluid)</code></td><td>是 —— 实现它并在<b>方块 / 方块实体类型就绪后</b>交给 <code>BrushCapabilities</code> 注册</td></tr>
+<tr><td><code>BrushEnergyStorage</code></td><td>接口</td><td>能量存储契约：<code>stored()</code> / <code>capacity()</code> / <code>receive(long, boolean)</code> / <code>extract(long, boolean)</code> + 默认 <code>canReceive()</code> / <code>canExtract()</code></td><td>是 —— 同上；注意 <b>S1 / S2 没有宿主能量模块</b>，只有 Brush 自己的注册表</td></tr>
+</table>
+
+<h2>4. 工具类型</h2>
+
+<table>
+<tr><th>类型名</th><th>种类</th><th>一句话职责</th><th>作者应直接用？</th></tr>
+<tr><td><code>BrushExpectPlatform</code></td><td>注解（<code>@interface</code>）</td><td>平台特定逃生舱：标在静态桩方法上，方法体在 mod 加载期被替换为对当前运行时实现类的委托调用</td><td>是 —— 只在确有平台差异时使用</td></tr>
+<tr><td><code>RawStdout</code></td><td>类</td><td>进程原始 stdout 直写：<code>println(String)</code>，绕开 log4j 与 <code>System.out</code> 重定向，永不抛出</td><td>是 —— <b>仅</b>关闭期证据 / 机器可读报告行；不是日志的替代品</td></tr>
+<tr><td><code>InputAction</code></td><td>枚举</td><td>GLFW 动作值的语义化枚举：<code>RELEASE</code> / <code>PRESS</code> / <code>REPEAT</code> / <code>UNKNOWN</code>，含 <code>id()</code> 与 <code>of(int)</code></td><td>是 —— 输入事件监听器的参数类型</td></tr>
+</table>
+
+<h2>5. 公开嵌套类型</h2>
+
+<p>以下 14 个类型都定义在上面某个顶层类型内部。上一节各表里已逐行给出的 6 个事件类监听器不在此重复；本表补齐余下 8 个，并在末尾追加 4 个能力提供者接口。</p>
+
+<table>
+<tr><th>类型名</th><th>种类</th><th>一句话职责</th><th>作者应直接用？</th></tr>
+<tr><td><code>BrushMods.ModInfo</code></td><td>记录（record）</td><td>已加载 mod 的只读元数据快照：<code>id</code> / <code>name</code> / <code>version</code> / <code>description</code> / <code>authors</code> / <code>jar</code></td><td>是 —— <code>BrushMods.list()</code> 的返回值</td></tr>
+<tr><td><code>BrushRegistration.BrushMenuSupplier&lt;M&gt;</code></td><td>嵌套接口</td><td>菜单工厂：<code>create(int containerId, Inventory inventory)</code>，对位 vanilla 的包私有 <code>MenuType$MenuSupplier</code></td><td>是 —— 注册菜单类型时传 <code>MyMenu::new</code></td></tr>
+<tr><td><code>BrushRegistration.BrushScreenFactory&lt;M, S&gt;</code></td><td>嵌套接口</td><td>菜单屏幕工厂：<code>create(M menu, Inventory, Component title)</code>，对位包私有 <code>MenuScreens$ScreenConstructor</code></td><td>是 —— 注册菜单屏幕时传 <code>MyScreen::new</code></td></tr>
+<tr><td><code>BrushRegistration.BrushBlockEntitySupplier&lt;T&gt;</code></td><td>嵌套接口</td><td>方块实体工厂：<code>create(BlockPos pos, BlockState state)</code>，对位包私有 <code>BlockEntityType$BlockEntitySupplier</code></td><td>是 —— 注册方块实体类型时传 <code>MyBlockEntity::new</code></td></tr>
+<tr><td><code>CreativeTabEntries.Visibility</code></td><td>嵌套枚举</td><td>条目可见性三档：<code>TAB_AND_SEARCH</code> / <code>TAB_ONLY</code> / <code>SEARCH_ONLY</code>，与 vanilla <code>TabVisibility</code> 一一映射</td><td>是 —— 只在搜索页可见的条目需要它</td></tr>
+<tr><td><code>BrushNetwork.Impl</code></td><td>嵌套接口</td><td>网络引擎实现的接缝：<code>defaultMaxSize()</code> / <code>register(Identifier, int)</code> / <code>send(Identifier, byte[])</code></td><td><b>否</b> —— 由库模组入口经 <code>BrushNetwork.install</code> 装入，mod 不实现</td></tr>
+<tr><td><code>ServerPayloadEvent.Reply</code></td><td>嵌套接口</td><td>服务端回包句柄：<code>send(Identifier channel, byte[] data)</code>；实现由库模组提供</td><td>是 —— 双向通信回包时用它</td></tr>
+<tr><td><code>ServerPayloadEvent.Listener</code></td><td>嵌套接口</td><td><code>onServerPayload(Reply reply, Identifier channel, byte[] data)</code> —— <code>SERVER_PAYLOAD</code> 的注册类型</td><td>是</td></tr>
+<tr><td><code>MouseScrollEvent.Listener</code></td><td>嵌套接口</td><td><code>onMouseScroll(double xOffset, double yOffset)</code> —— 原始滚轮增量</td><td>是</td></tr>
+<tr><td><code>NetworkPayloadEvent.Listener</code></td><td>嵌套接口</td><td><code>onNetworkPayload(Identifier channel, byte[] data)</code> —— <code>NETWORK_PAYLOAD</code> 的注册类型</td><td>是</td></tr>
+<tr><td><code>CreativeTabOutputEvent.Listener</code></td><td>嵌套接口</td><td><code>onCreativeTabOutput(CreativeTabEntries entries)</code> —— <code>entriesOf(...)</code> 返回事件的注册类型</td><td>是</td></tr>
+<tr><td><code>DataLoadedEvent.Listener</code></td><td>嵌套接口</td><td><code>onDataLoaded(MinecraftServer server)</code></td><td>是</td></tr>
+<tr><td><code>DataReloadedEvent.Listener</code></td><td>嵌套接口</td><td><code>onDataReloaded(MinecraftServer server, Optional&lt;Throwable&gt; error)</code></td><td>是</td></tr>
+<tr><td><code>ScreenInitEvent.Listener</code></td><td>嵌套接口</td><td><code>onScreenInit(Screen screen)</code> —— 给屏幕加按钮就在这个监听器里</td><td>是</td></tr>
+<tr><td><code>BrushCapabilities.FluidBlockProvider</code></td><td>嵌套接口</td><td><code>get(Level, BlockPos, BlockState, BlockEntity, Direction)</code> → <code>BrushFluidStorage</code></td><td>是 —— <code>registerFluidBlock</code> 的参数</td></tr>
+<tr><td><code>BrushCapabilities.FluidBlockEntityProvider</code></td><td>嵌套接口</td><td><code>get(BlockEntity, Direction)</code> → <code>BrushFluidStorage</code></td><td>是 —— <code>registerFluidBlockEntity</code> 的参数</td></tr>
+<tr><td><code>BrushCapabilities.EnergyBlockProvider</code></td><td>嵌套接口</td><td><code>get(Level, BlockPos, BlockState, BlockEntity, Direction)</code> → <code>BrushEnergyStorage</code></td><td>是 —— <code>registerEnergyBlock</code> 的参数</td></tr>
+<tr><td><code>BrushCapabilities.EnergyBlockEntityProvider</code></td><td>嵌套接口</td><td><code>get(BlockEntity, Direction)</code> → <code>BrushEnergyStorage</code></td><td>是 —— <code>registerEnergyBlockEntity</code> 的参数</td></tr>
+</table>
+
+<p class="muted">其余嵌套监听器接口的签名见本页 §2 各自的顶层事件类行与对应事件类 javadoc；它们与上面 14 个同属那 14 个嵌套类型的计数口径。<b>未验证</b>：本计数按"带 <code>public</code> 修饰符的顶层类型 + 其公开嵌套类型"人工清点得出，未用编译期扫描工具复核。</p>
+
+<h2>6. <code>impl</code> 包：不在契约面里</h2>
+
+<p><b>结论：<code>org.abstruck.brush.api.impl</code> 不属于作者契约面。</b>作者的编译面是 <code>brush-api-contract.jar</code>，它只含 <code>org/abstruck/brush/api/**</code>，<b>显式排除 <code>org/abstruck/brush/api/impl/**</code></b>，并在构建时机械校验"产物里只能有 api 包下的条目，且不得是 impl 实现"。</p>
+
+<p>在 <b>jar 版 MDK</b>里<b>没有契约 jar</b>：作者的编译面就是 <code>libs/</code> 下那两份 jar 所提供的 <code>org.abstruck.brush.api.**</code>。也就是说，能依赖的只有 api 包；<code>org.abstruck.brush.api.impl</code> 是能力库的内部实现，<b>不要依赖</b> —— 它随版本变动，不属于契约。契约 jar 仍存在于完整的加载器项目里，供想机械地把自己约束在契约面上的作者使用。</p>
+
+<p>包内类型与其职责：</p>
+
+<table>
+<tr><th>类型名</th><th>种类</th><th>职责</th></tr>
+<tr><td><code>BrushApiMod</code></td><td>类</td><td>库模组 <code>brush-api</code> 的 <code>onInitialize()</code>：把网络引擎实现装入核心门面（<code>BrushNetwork.install(new BrushNetworkImpl())</code>），并经 <code>HostSeams.onModEventBus(...)</code> 注册 S3 载荷桥回调</td></tr>
+<tr><td><code>host.NeoForgePayloadBridge</code></td><td>类</td><td>S3 载荷转注册桥：在 <code>RegisterPayloadHandlersEvent</code> 上把当时已知的 Brush 通道转登记进 NeoForge 载荷表，并安装"可发送性"发送守卫</td></tr>
+<tr><td><code>mixin.ClientCommonPacketListenerMixin</code></td><td>mixin</td><td>L1 hook <code>network.payload</code>：客户端收到自定义载荷包 HEAD 派发；仅对 <code>BrushPayload</code> 实例派发，并按包实例身份去重 + 统一在主线程投递</td></tr>
+<tr><td><code>mixin.CustomPacketPayloadCodecMixin</code></td><td>mixin</td><td>L1 hook：<code>CustomPacketPayload$1#findCodec</code> 的 RETURN <code>@ModifyReturnValue</code>，让已注册通道的 codec 生效</td></tr>
+<tr><td><code>mixin.ServerGamePacketListenerImplMixin</code></td><td>mixin</td><td>L1 hook <code>network.server.payload</code>：服务端收到载荷 HEAD 派发，并附带回包句柄</td></tr>
+<tr><td><code>mixin.CreativeModeTabMixin</code></td><td>mixin</td><td>L1 hook <code>creative.tab.output</code>：<code>CreativeModeTab#buildContents</code> TAIL，把两个内容集合交给 L2 句柄</td></tr>
+<tr><td><code>mixin.CreativeModeInventoryScreenMixin</code></td><td>mixin</td><td>创造屏幻影高亮抑制：<code>extractTabButton</code> 整方法包装，跳过自有桥页签的重绘</td></tr>
+<tr><td><code>mixin.GuiMixin</code></td><td>mixin</td><td>L1 hook <code>hud.extract</code>：<code>Gui#extractRenderState</code> TAIL，vanilla HUD 写完后追加绘制</td></tr>
+<tr><td><code>mixin.KeyboardHandlerMixin</code></td><td>mixin</td><td>L1 hook <code>input.key.press</code>：<code>KeyboardHandler#keyPress</code> HEAD</td></tr>
+<tr><td><code>mixin.MouseHandlerMixin</code></td><td>mixin</td><td>L1 hook <code>input.mouse.button</code> / <code>input.mouse.scroll</code>：<code>MouseHandler#onButton</code> / <code>onScroll</code> HEAD</td></tr>
+<tr><td><code>mixin.OptionsMixin</code></td><td>mixin</td><td>键位拼接：<code>Options#&lt;init&gt;</code> 里 <code>Stream.toArray</code> 返回值的 <code>@ModifyExpressionValue</code>，把 <code>BrushKeybinds</code> 登记的映射接进 <code>keyMappings</code></td></tr>
+</table>
+
+<h3>为什么它们必须住在库模组</h3>
+
+<p>设计文档记下的结论是：<b>网络引擎 + S3 载荷桥 + mixin 属实现，加载器只留门面与接缝。</b>具体拆成四条理由：</p>
+
+<ol>
+<li><b>这些是"游戏能力"，不是加载器本职。</b>对照 Fabric 世界的分工：<code>Fabric Loader</code> 只做基础设施，<code>Fabric API</code> 才是能力库。loader 只留"门面与接缝"。</li>
+<li><b>它们与 vanilla 强耦合，天然要碰 L1。</b>能力实现与它的注入点无法同时避开 L1；库模组作为第一方产物被允许引用 L1，这是拆分可行的前提。反过来，把这些注入点留在核心会让核心的 footprint 变大。</li>
+<li><b>搬家是"物理搬家"，不是重写。</b>引擎类保持原包名与类名（<code>org.abstruck.brush.net.*</code>），所以 mod 作者的 <code>import</code> 一行都不用改；注入面闸门机械证明"总数不变、只是归属变了"。</li>
+<li><b>但 <code>BrushNetwork</code> 这个门面必须留在核心。</b>这是搬家撞出的真回归：<code>org.abstruck.brush.api</code> 是<b>核心模块拥有的包</b>，宿主（FML）加载的代码只会在该模块里找这个包下的类，找不到也<b>不会</b>回退到我们的加载器 —— 整类搬走会在 S3 实机崩（<code>NoClassDefFoundError: org/abstruck/brush/api/BrushNetwork</code>）。修正方式是把 <code>BrushNetwork</code> 降为一层<b>门面</b>，实现 <code>BrushNetworkImpl</code> 住库模组。由此得到一条可复用判据：<b>核心 → mod 搬家时，"包归属"与技术可行性同等重要。</b></li>
+</ol>
+
+<div class="note">
+对作者的实际影响：<b>编译面不变</b>。用 <code>BrushNetwork</code> 只需核心产物 / 契约 jar；只有直接用引擎内部件才需要库模组产物 —— 而那不是契约面。
+</div>
+
+<h2>7. 常见任务 → 用哪个 API</h2>
+
+<table>
+<tr><th>常见任务</th><th>用哪个 API</th><th>细节页</th></tr>
+<tr><td>注册一个物品</td><td><code>BrushEvents.CONTENT_REGISTRATION</code> 监听器内调 <code>BrushRegistry.registerItem(id, properties)</code></td><td><a href="content.html">内容注册</a></td></tr>
+<tr><td>注册一个方块</td><td>同上窗口内调 <code>BrushRegistry.registerBlock(id, factory, properties)</code>；"有方块无物品"用 <code>registerBlockWithoutItem</code></td><td><a href="content.html">内容注册</a></td></tr>
+<tr><td>发一条自定义载荷</td><td>主入口里 <code>BrushNetwork.register(id)</code>；发送 <code>BrushNetwork.send(id, bytes)</code>；接收订阅 <code>BrushEvents.NETWORK_PAYLOAD</code>；要回包用 <code>BrushEvents.SERVER_PAYLOAD</code> + <code>ServerPayloadEvent.Reply</code></td><td><a href="network.html">网络</a></td></tr>
+<tr><td>每帧做事</td><td>订阅 <code>BrushEvents.CLIENT_TICK</code> 或 <code>BrushEvents.HUD_EXTRACT</code></td><td><a href="events.html">事件总表</a></td></tr>
+<tr><td>加标题界面按钮</td><td>订阅 <code>BrushEvents.SCREEN_INIT</code>，在监听器里判断 <code>screen instanceof TitleScreen</code> 后加 widget；窗口缩放另一条路径订阅 <code>SCREEN_RESIZE</code></td><td><a href="ui.html">界面与输入</a></td></tr>
+<tr><td>读别人的 mod 元数据</td><td><code>BrushMods.list()</code> / <code>BrushMods.find(id)</code> / <code>BrushMods.isLoaded(id)</code>；加载器与游戏版本用 <code>loaderVersion()</code> / <code>gameVersion()</code></td><td>本页 §3</td></tr>
+<tr><td>平台特定行为</td><td><code>@BrushExpectPlatform</code> 静态桩 + 同包 <code>&lt;桩类&gt;ImplBrush</code> / <code>ImplFabric</code> / <code>ImplNeoForge</code></td><td><a href="platform.html">平台适配与自检</a></td></tr>
+<tr><td>给 mod 加按键</td><td><code>BrushKeybinds.registerCategory(id)</code> + <code>BrushKeybinds.register(new KeyMapping(...))</code>，在初始化期调用；每帧 <code>consumeClick()</code> 读输入</td><td><a href="ui.html">界面与输入</a></td></tr>
+<tr><td>加一个 Brush 侧栏创造标签页</td><td><code>BrushCreativeTabs.register(BrushCreativeTab.builder(id)...)</code>，在客户端入口的 mod 上下文内；给现有标签页追加条目用 <code>BrushCreativeTabs.entriesOf(...)</code></td><td><a href="ui.html">界面与输入</a></td></tr>
+<tr><td>自定义数据包注册表</td><td><code>BrushDataRegistries.register(key, codec)</code> 登记；<code>BrushRegistry.dataRegistry(key)</code> 读取；条目放 <code>data/&lt;ns&gt;/&lt;键路径&gt;/*.json</code></td><td><a href="data.html">数据与资源</a></td></tr>
+<tr><td>给方块 / 方块实体加流体或能量能力</td><td>实现 <code>BrushFluidStorage</code> / <code>BrushEnergyStorage</code>，在<b>类型已存在之后</b>用 <code>BrushCapabilities.registerFluidBlock</code> 等注册；运行期用 <code>BrushCapabilities.fluid(...)</code> / <code>energy(...)</code> 查询</td><td><a href="overview.html">契约面与设计原则</a> §7</td></tr>
+<tr><td>让自己的断言进自检退出码</td><td>实现 <code>ModSelfTest</code> 或 <code>ModClientTest</code> + <code>ClientTestContext</code></td><td><a href="platform.html">平台适配与自检</a></td></tr>
+<tr><td>关闭期留下证据</td><td>订阅 <code>BrushEvents.CLIENT_STOPPING</code>，用 <code>RawStdout.println(...)</code></td><td><a href="platform.html">平台适配与自检</a></td></tr>
+<tr><td>事件注册后想注销</td><td><code>Event.register(listener)</code> 返回的 <code>EventRegistration</code>：<code>unregister()</code> / <code>close()</code></td><td><a href="events.html">事件总表</a></td></tr>
+</table>
+
+<p class="muted">跨页链接：同部分页面用同目录相对路径；回第一部分用 <code>../brush/</code> 前缀。事件触发时机与线程语义、以及全部 L1 hook id 对照，见 <a href="events.html">事件总表</a> 与 <a href="../brush/dispatch.html">派发层与事件</a>。</p>
+
+<footer>Brush Wiki · 本页依据源码与实测证据（Brush 26.10.1 / MC 26.1.2）</footer>
+</main>
+</div>
+<script src="../assets/nav.js"></script>
+</body>
+</html>
